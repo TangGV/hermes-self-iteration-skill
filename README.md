@@ -37,6 +37,16 @@
 5. **沉淀能力**  
    可复用的流程和踩坑写入 skill；长期偏好和稳定事实写入 memory；单次进度不写 memory。
 
+### ROI Gate / 下一轮收益评估
+
+每轮迭代后必须先评估下一轮 ROI，再决定继续或停止。低 ROI、收益递减、需要用户 taste/业务方向判断、或继续会制造噪声/成本时，应停止并等待用户介入。
+
+ROI 评分满分 8 分：影响、确定性、成本、用户依赖各 0-2 分。
+
+- **6-8**：继续下一轮
+- **4-5**：只做一轮小而确定的改进，再评估
+- **0-3**：停止迭代，等待用户介入
+
 ### AUTO-MATURE 闭环
 
 ```text
@@ -123,6 +133,16 @@ This skill is not about answering a single question. It is about making the agen
 5. **Compound learning**  
    Reusable workflows and pitfalls go into skills; durable preferences and facts go into memory; one-off task progress does not.
 
+### ROI Gate
+
+After each iteration, the agent must evaluate the ROI of the next iteration before continuing. If ROI is low, returns are diminishing, user taste/business direction is needed, or continuing would create noise/cost, the agent should stop and wait for user input.
+
+The ROI score is out of 8: impact, certainty, cost, and user-dependency each score 0-2.
+
+- **6-8**: continue
+- **4-5**: do one small certain improvement, then re-evaluate
+- **0-3**: stop and wait for user intervention
+
 ### AUTO-MATURE Loop
 
 ```text
@@ -183,6 +203,10 @@ skills/software-development/hermes-self-iteration/SKILL.md
 README.md
 LICENSE
 ```
+
+## Current Version
+
+`hermes-self-iteration` v0.9.0
 
 ## License
 
