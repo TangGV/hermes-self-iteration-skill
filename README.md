@@ -100,6 +100,15 @@ hermes curator pin hermes-self-iteration
 
 ---
 
+## 专业智能模式
+
+`v1.0.0` 增加了专业智能操作系统：Agent 每轮同时扮演 Owner、Architect、Operator、Reviewer，并用专业分诊、证据等级、Professional Gate、决策记录来控制质量。
+
+- **专业分诊**：缺失型 / 故障型 / 质量型 / 体验型 / 运维型 / 策略型
+- **证据等级**：E0 推测 → E4 持续运行/真实反馈
+- **Professional Gate**：正确性、完整性、可维护性、安全性、可观测性、体验
+- **专业报告模板**：见 `skills/software-development/hermes-self-iteration/references/professional-iteration-report.md`
+
 ## English
 
 **Hermes Self-Iteration Skill** is a high-level execution protocol for Hermes Agent. Given a target object and a desired outcome, it instructs the agent to automatically perform:
@@ -196,6 +205,15 @@ Use hermes-self-iteration to iterate hermes-self-iteration itself.
 
 ---
 
+## Professional Intelligence Mode
+
+`v1.0.0` adds a professional intelligence operating system: the agent acts as Owner, Architect, Operator, and Reviewer in every round, and uses triage, evidence levels, Professional Gate, and decision records to control quality.
+
+- **Triage**: missing / failure / quality / experience / ops / strategy
+- **Evidence levels**: E0 speculation → E4 sustained operation or real feedback
+- **Professional Gate**: correctness, completeness, maintainability, safety, observability, experience
+- **Professional report template**: see `skills/software-development/hermes-self-iteration/references/professional-iteration-report.md`
+
 ## Repository Layout
 
 ```text
@@ -206,7 +224,7 @@ LICENSE
 
 ## Current Version
 
-`hermes-self-iteration` v0.9.0
+`hermes-self-iteration` v1.0.0
 
 ## License
 
