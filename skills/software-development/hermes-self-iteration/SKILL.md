@@ -1,7 +1,7 @@
 ---
 name: hermes-self-iteration
 description: "Use as the default autonomous iteration protocol: given a target project/system and goal, analyze comprehensively, plan, execute, verify, and keep upgrading automatically until a mature result or hard blocker."
-version: 1.0.0
+version: 1.0.1
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -135,6 +135,27 @@ Agent 必须默认承担 **项目负责人 + 分析师 + 执行者 + QA + 复盘
 6. **不递归调度**：cron 运行时绝不能再创建新的 cronjob，避免无限递归。
 
 默认频率：**按需开启，不默认高频常驻**。若用户临时要求高频（如 5 分钟），必须在每轮执行后使用 ROI gate 判断是否应暂停；高频模式只适合短期强化，不能无限运行。
+
+### 停止自我迭代：先停调度源，再停当前进程
+
+用户说「停止自我迭代」「停止迭代」「停掉自我迭代」「怎么停不下来」时，这是 **控制指令**，不是普通反馈。Agent 必须把它理解为停止所有匹配的自我迭代自动化，而不是只停止当前回复或当前可见后台进程。
+
+必须按顺序执行：
+
+1. **先查 durable trigger**：调用 `cronjob(action='list')`，找出名称、prompt、skills、script、workdir 中包含 `self-iteration` / `自我迭代` / 当前项目名的任务。
+2. **暂停或移除匹配 cron**：默认先 `pause`，除非用户明确要求删除；包括 AI Ops、DC、Taste-Skill、skill 自维护等自我迭代任务。
+3. **再停运行中任务**：调用 `process(action='list')`，kill 匹配的后台进程。
+4. **清理残留服务/端口**：根据运行输出检查项目端口；AI Ops 默认要检查并清理 `127.0.0.1:8799` 残留监听。
+5. **二次验证**：重新列出 cron、process、必要端口。只有确认 durable trigger 已暂停/删除或明确不存在后，才能回复「已停止」。
+
+禁止反模式：
+
+- 只回复「已停止」但没有查 cron。
+- 只 kill 当前 background process，却保留每小时/每分钟 cron。
+- 看到 Hermes 进程表为空就结束；必须检查调度源和项目端口。
+- 用户已经要求停止时，还继续做 UI/代码/文案优化。
+
+未来创建自我迭代 cron 时，prompt 必须内置本停止协议；默认使用有限 `repeat`，只有用户明确要求长期常驻时才用 `forever`。
 
 ### cron prompt 要求
 
@@ -424,7 +445,7 @@ Agent 应形成一个简短但可执行的 **迭代地图**：
 - **成熟标准达成**：对象已达到当前可合理交付状态，并通过验证
 - **硬阻塞**：缺权限、缺凭证、缺外部信息、需要用户做业务决策
 - **风险边界**：将执行高风险/破坏性/生产影响动作，需要用户明确确认
-- **用户明确停止**：用户说停、只分析、只计划、不改
+- **用户明确停止**：用户说停、只分析、只计划、不改；如果是“停止自我迭代/停止迭代/怎么停不下来”，必须执行“停止自我迭代：先停调度源，再停当前进程”协议，暂停匹配 cron、kill 后台进程、清理残留端口并二次验证后再汇报。
 - **资源边界**：时间/上下文/工具限制即将影响质量；应保存状态并给出下一轮入口
 
 停止时不能只说“我做了 X”，必须说明：成熟度、验证证据、剩余问题、下一步建议或已排除原因。

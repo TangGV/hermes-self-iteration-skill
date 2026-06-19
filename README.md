@@ -37,6 +37,9 @@
 5. **沉淀能力**  
    可复用的流程和踩坑写入 skill；长期偏好和稳定事实写入 memory；单次进度不写 memory。
 
+6. **停止要停源头**  
+   用户说“停止自我迭代/停止迭代/怎么停不下来”时，必须先暂停匹配的 cron 调度源，再 kill 后台进程和残留端口；不能只回复“已停止”。
+
 ### ROI Gate / 下一轮收益评估
 
 每轮迭代后必须先评估下一轮 ROI，再决定继续或停止。低 ROI、收益递减、需要用户 taste/业务方向判断、或继续会制造噪声/成本时，应停止并等待用户介入。
@@ -142,6 +145,9 @@ This skill is not about answering a single question. It is about making the agen
 5. **Compound learning**  
    Reusable workflows and pitfalls go into skills; durable preferences and facts go into memory; one-off task progress does not.
 
+6. **Stop the source, not just the visible run**  
+   When the user says “stop self-iteration”, “stop iteration”, or complains that it will not stop, first pause matching cron triggers, then kill background processes and residual listeners. Do not merely answer “stopped”.
+
 ### ROI Gate
 
 After each iteration, the agent must evaluate the ROI of the next iteration before continuing. If ROI is low, returns are diminishing, user taste/business direction is needed, or continuing would create noise/cost, the agent should stop and wait for user input.
@@ -224,7 +230,7 @@ LICENSE
 
 ## Current Version
 
-`hermes-self-iteration` v1.0.0
+`hermes-self-iteration` v1.0.1
 
 ## License
 
