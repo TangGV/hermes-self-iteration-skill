@@ -1,237 +1,132 @@
-# Hermes Self-Iteration Skill / Hermes 自我驱动迭代技能
+# Hermes 技能库
 
-[中文](#中文说明) | [English](#english)
+这是用户私有的 Hermes Skill 仓库，用来统一保存、分类和版本管理常用技能。以后新增可复用流程、运维方案、开发规范、排障经验时，优先沉淀到这里，而不是散落在单独仓库或临时文件里。
 
+## 仓库目标
+
+- **统一归档**：所有用户自定义 skill 都放在本仓库 `skills/` 目录下。
+- **按领域分类**：使用 Hermes 常见分类目录，例如 `devops`、`software-development`、`research`、`productivity`。
+- **全中文维护**：README、说明、操作流程、注意事项默认使用中文。
+- **可复用优先**：记录稳定流程和踩坑，不记录一次性任务进度。
+- **可提交可回滚**：每次新增或修改 skill 都通过 git commit 管理。
+
+## 目录结构
+
+```text
+skills/
+  devops/
+    linux-outbound-proxy-mihomo/
+      SKILL.md
+  software-development/
+    hermes-self-iteration/
+      SKILL.md
+      references/
+        professional-iteration-report.md
+```
+
+## 当前技能索引
+
+| 分类 | Skill | 用途 |
+|---|---|---|
+| `devops` | `linux-outbound-proxy-mihomo` | 通用 Linux 出站代理方案：mihomo 本机代理、订阅/节点处理、应用接入、出口验证、watchdog 故障切换与回退。 |
+| `software-development` | `hermes-self-iteration` | Hermes 自我驱动迭代流程：分析、规划、执行、验证、复盘，适合持续改进项目、服务、文档和工作流。 |
+
+## 分类规则
+
+新增 skill 时按以下规则放置：
+
+| 分类 | 放什么 |
+|---|---|
+| `devops` | VPS、Linux、Docker、systemd、代理、监控、备份、部署、服务运维。 |
+| `software-development` | 编码流程、调试方法、测试规范、项目迭代、代码审查、工程实践。 |
+| `research` | 信息检索、资料分析、论文/博客/情报监控。 |
+| `productivity` | 文档、表格、办公自动化、汇报模板。 |
+| `media` | 图片、音频、视频、可视化处理。 |
+
+不要轻易新增顶层分类；能归入现有分类就使用现有分类。
+
+## Skill 编写规范
+
+每个 skill 使用如下结构：
+
+```text
+skills/<分类>/<skill-name>/SKILL.md
+```
+
+`SKILL.md` 必须包含 YAML frontmatter：
+
+```yaml
 ---
-
-## 中文说明
-
-**Hermes Self-Iteration Skill** 是一个面向 Hermes Agent 的上层执行协议。它的目标是让 AI 在用户给出目标对象和期望结果后，自动完成：
-
-> **全面分析 → 找出问题/机会 → 制定迭代路线 → 自动执行改造 → 真实验证 → 继续下一轮 → 直到结果成熟或遇到硬阻塞。**
-
-这个 skill 的重点不是“回答问题”，而是让 Agent 对一个项目、系统、服务、文档、工作流或产品想法进行 **自我驱动的连续升级**。
-
-### 适合什么场景？
-
-- 对一个代码仓库做自动架构分析、修复、测试补齐、重构和优化
-- 对 VPS / 服务栈做健康分析、配置整理、监控与恢复流程强化
-- 对爬虫 / 数据链路做可靠性、调度、验证闭环优化
-- 对 Hermes 自身的配置、skills、memory、cron、网关流程做持续完善
-- 对文档、方案、产品想法进行多轮打磨，直到达到可交付状态
-
-### 核心理念
-
-1. **自动，不等口令**  
-   用户只需要给对象和方向，Agent 不应每一步都问“要不要继续”。
-
-2. **先全面分析，再动手改造**  
-   第一轮必须理解结构、依赖、运行方式、风险、质量和机会，而不是看到一个点就改一个点。
-
-3. **验证是硬门槛**  
-   没有测试、命令、日志、读回、健康检查等证据，不算完成。
-
-4. **多轮升级，不一轮即停**  
-   每轮后自动判断是否还有 P0/P1/P2 或高 ROI 改造点，必要时继续下一轮。
-
-5. **沉淀能力**  
-   可复用的流程和踩坑写入 skill；长期偏好和稳定事实写入 memory；单次进度不写 memory。
-
-6. **停止要停源头**  
-   用户说“停止自我迭代/停止迭代/怎么停不下来”时，必须先暂停匹配的 cron 调度源，再 kill 后台进程和残留端口；不能只回复“已停止”。
-
-### ROI Gate / 下一轮收益评估
-
-每轮迭代后必须先评估下一轮 ROI，再决定继续或停止。低 ROI、收益递减、需要用户 taste/业务方向判断、或继续会制造噪声/成本时，应停止并等待用户介入。
-
-ROI 评分满分 8 分：影响、确定性、成本、用户依赖各 0-2 分。
-
-- **6-8**：继续下一轮
-- **4-5**：只做一轮小而确定的改进，再评估
-- **0-3**：停止迭代，等待用户介入
-
-### AUTO-MATURE 闭环
-
-```text
-A. Analyze    全面分析现状、目标、约束、风险、机会
-U. Understand 建立对象地图：结构、依赖、数据流、运行方式、历史决策
-T. Target     定义成熟标准：什么叫“完善/成熟/可交付”
-O. Optimize   自动选择最高价值改造点并执行
-
-M. Measure    真实验证：测试、日志、健康检查、人工可读审查
-A. Adapt      根据验证结果调整下一轮策略
-T. Trace      记录决策、变更、证据、剩余问题
-U. Upgrade    继续下一轮升级，不因完成一个小任务就停
-R. Reflect    把可复用流程写回 skill/memory/项目文档
-E. End        仅在成熟标准达成或硬阻塞时结束
-```
-
-### 安装
-
-把 `SKILL.md` 放到 Hermes 用户技能目录：
-
-```bash
-mkdir -p ~/.hermes/skills/software-development/hermes-self-iteration
-cp skills/software-development/hermes-self-iteration/SKILL.md   ~/.hermes/skills/software-development/hermes-self-iteration/SKILL.md
-```
-
-可选：为了防止 curator 自动归档该技能，可以 pin：
-
-```bash
-hermes curator pin hermes-self-iteration
-```
-
-### 使用示例
-
-```text
-用自我迭代优化这个项目。
-```
-
-```text
-把这个服务自动分析并完善，直到成熟。
-```
-
-```text
-用 hermes-self-iteration 迭代 hermes-self-iteration 自己。
-```
-
-### 重要边界
-
-- 用户明确说“只分析 / 只计划 / 不改”时，不应进入改造。
-- 生产、高风险、破坏性、凭证相关操作必须遵守安全边界。
-- 任务进度不要写入 memory；只把长期偏好、稳定事实、可复用流程写入持久层。
-
+name: skill-name
+description: "中文说明：什么时候使用这个 skill，以及它解决什么问题。"
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+platforms: [linux]
+metadata:
+  hermes:
+    tags: [tag1, tag2]
+    related_skills: []
 ---
-
-## 专业智能模式
-
-`v1.0.0` 增加了专业智能操作系统：Agent 每轮同时扮演 Owner、Architect、Operator、Reviewer，并用专业分诊、证据等级、Professional Gate、决策记录来控制质量。
-
-- **专业分诊**：缺失型 / 故障型 / 质量型 / 体验型 / 运维型 / 策略型
-- **证据等级**：E0 推测 → E4 持续运行/真实反馈
-- **Professional Gate**：正确性、完整性、可维护性、安全性、可观测性、体验
-- **专业报告模板**：见 `skills/software-development/hermes-self-iteration/references/professional-iteration-report.md`
-
-## English
-
-**Hermes Self-Iteration Skill** is a high-level execution protocol for Hermes Agent. Given a target object and a desired outcome, it instructs the agent to automatically perform:
-
-> **Comprehensive analysis → identify issues/opportunities → define an iteration roadmap → execute improvements → verify with evidence → continue upgrading → stop only when mature or hard-blocked.**
-
-This skill is not about answering a single question. It is about making the agent continuously improve a project, system, service, document, workflow, or product idea until it reaches a mature deliverable state.
-
-### Use Cases
-
-- Automatically analyze, fix, test, refactor, and optimize a code repository
-- Inspect and harden a VPS or service stack with health checks and recovery workflows
-- Improve crawler/data pipelines for reliability, scheduling, deduplication, and validation
-- Continuously refine Hermes configuration, skills, memory, cron jobs, and gateway workflows
-- Iterate on documents, plans, or product ideas until they become deliverable
-
-### Core Principles
-
-1. **Autonomous by default**  
-   The user provides the target and direction; the agent should not ask for permission at every step.
-
-2. **Analyze comprehensively before changing things**  
-   The first round must understand structure, dependencies, runtime, risks, quality, and opportunities.
-
-3. **Verification is mandatory**  
-   A task is not complete without evidence: tests, command output, logs, read-back checks, health probes, or reviewable artifacts.
-
-4. **Keep iterating, do not stop after one small fix**  
-   After each round, the agent should decide whether remaining P0/P1/P2 issues or high-ROI improvements justify another round.
-
-5. **Compound learning**  
-   Reusable workflows and pitfalls go into skills; durable preferences and facts go into memory; one-off task progress does not.
-
-6. **Stop the source, not just the visible run**  
-   When the user says “stop self-iteration”, “stop iteration”, or complains that it will not stop, first pause matching cron triggers, then kill background processes and residual listeners. Do not merely answer “stopped”.
-
-### ROI Gate
-
-After each iteration, the agent must evaluate the ROI of the next iteration before continuing. If ROI is low, returns are diminishing, user taste/business direction is needed, or continuing would create noise/cost, the agent should stop and wait for user input.
-
-The ROI score is out of 8: impact, certainty, cost, and user-dependency each score 0-2.
-
-- **6-8**: continue
-- **4-5**: do one small certain improvement, then re-evaluate
-- **0-3**: stop and wait for user intervention
-
-### AUTO-MATURE Loop
-
-```text
-A. Analyze    Analyze current state, goals, constraints, risks, opportunities
-U. Understand Map structure, dependencies, data flow, runtime, history
-T. Target     Define maturity criteria: what “done/mature/deliverable” means
-O. Optimize   Select and execute the highest-value improvement
-
-M. Measure    Verify with tests, logs, health checks, or reviewable artifacts
-A. Adapt      Adjust the next iteration based on verification results
-T. Trace      Record decisions, changes, evidence, and remaining issues
-U. Upgrade    Continue upgrading; do not stop after one small task
-R. Reflect    Write reusable lessons into skills/memory/project docs
-E. End        Stop only when maturity is reached or a hard blocker appears
 ```
 
-### Installation
+正文建议包含：
 
-Copy `SKILL.md` into your Hermes user skill directory:
+1. `# 标题`
+2. `## 目标`
+3. `## 适用场景`
+4. `## 不适用场景`
+5. `## 实现步骤` 或 `## 工作流`
+6. `## 常用命令`
+7. `## 常见坑`
+8. `## 验收清单`
+
+## 内容原则
+
+- 默认中文。
+- 写真实可执行命令，不写空泛描述。
+- 不写明文密钥、token、订阅 URL、密码。
+- 不把一次性进度、临时任务、PR 号、commit 号写进 skill。
+- 如果流程和某个具体项目无关，应写成通用方案。
+- 如果流程只适合某个项目，要在 skill 里明确边界。
+- 每个 skill 都要有验证步骤和回滚/安全注意事项。
+
+## 安装到 Hermes
+
+从仓库复制某个 skill 到 Hermes 用户技能目录，例如：
 
 ```bash
-mkdir -p ~/.hermes/skills/software-development/hermes-self-iteration
-cp skills/software-development/hermes-self-iteration/SKILL.md   ~/.hermes/skills/software-development/hermes-self-iteration/SKILL.md
+mkdir -p ~/.hermes/skills/devops/linux-outbound-proxy-mihomo
+cp skills/devops/linux-outbound-proxy-mihomo/SKILL.md \
+  ~/.hermes/skills/devops/linux-outbound-proxy-mihomo/SKILL.md
 ```
 
-Optional: pin it so the curator never archives it automatically:
+也可以复制整个 `skills/` 目录到 Hermes 用户技能目录。
+
+## 维护流程
+
+新增或修改 skill 后：
 
 ```bash
-hermes curator pin hermes-self-iteration
+git status --short
+git add skills/<分类>/<skill-name>/SKILL.md README.md
+git commit -m 'feat: add <skill-name> skill'
+git push origin main
 ```
 
-### Example Prompts
+提交前检查：
 
-```text
-Use self-iteration to improve this project.
-```
+- [ ] frontmatter 可被 YAML 解析。
+- [ ] `name` 和目录名一致。
+- [ ] `description` 是中文，且不超过 1024 字符。
+- [ ] 正文不是空模板，有实际流程。
+- [ ] 没有泄露密钥、订阅 URL、token、cookie。
+- [ ] 适用场景和不适用场景写清楚。
+- [ ] 包含验证步骤。
+- [ ] 包含常见坑或回滚方式。
 
-```text
-Analyze and upgrade this service automatically until it is mature.
-```
+## 当前版本
 
-```text
-Use hermes-self-iteration to iterate hermes-self-iteration itself.
-```
+本仓库当前定位：**用户私有 Hermes 技能库**。
 
-### Safety Boundaries
-
-- If the user explicitly says “analysis only”, “plan only”, or “do not modify files”, do not execute changes.
-- Production, destructive, credential-related, or high-risk operations must respect safety boundaries.
-- Do not store one-off task progress in memory; only store durable preferences, stable facts, and reusable procedures.
-
----
-
-## Professional Intelligence Mode
-
-`v1.0.0` adds a professional intelligence operating system: the agent acts as Owner, Architect, Operator, and Reviewer in every round, and uses triage, evidence levels, Professional Gate, and decision records to control quality.
-
-- **Triage**: missing / failure / quality / experience / ops / strategy
-- **Evidence levels**: E0 speculation → E4 sustained operation or real feedback
-- **Professional Gate**: correctness, completeness, maintainability, safety, observability, experience
-- **Professional report template**: see `skills/software-development/hermes-self-iteration/references/professional-iteration-report.md`
-
-## Repository Layout
-
-```text
-skills/software-development/hermes-self-iteration/SKILL.md
-README.md
-LICENSE
-```
-
-## Current Version
-
-`hermes-self-iteration` v1.0.1
-
-## License
-
-MIT
+后续所有用户自定义技能默认都归档到本仓库，并按分类维护。

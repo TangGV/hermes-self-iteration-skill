@@ -1,6 +1,6 @@
 ---
 name: linux-outbound-proxy-mihomo
-description: "Use when implementing a generic Linux outbound proxy scheme with local mihomo: fetch or convert subscription nodes, expose local mixed/socks proxy ports, verify egress IP and region, configure applications through proxy environment variables or app-level proxy settings, and add watchdog failover or rollback."
+description: "用于实现通用 Linux 服务器出站代理方案：使用本机 mihomo 拉取或转换订阅节点，提供 mixed/socks 代理端口，验证出口 IP 和地区，通过环境变量或软件自身代理配置接入应用，并配置 watchdog 故障切换和回退。"
 version: 1.0.0
 author: Hermes Agent
 license: MIT
