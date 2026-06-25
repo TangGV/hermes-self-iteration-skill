@@ -18,6 +18,10 @@ skills/
     cursor-subapi-compat/
       SKILL.md
       references/
+    subapi-gpt-image2-compat/
+      SKILL.md
+      references/
+      scripts/
     linux-outbound-proxy-mihomo/
       SKILL.md
   software-development/
@@ -32,6 +36,7 @@ skills/
 | 分类 | Skill | 用途 |
 |---|---|---|
 | `devops` | `cursor-subapi-compat` | Cursor IDE 接 SubAPI：Override Base `https://subapi.aigcfast.com/cursor/v1`、SubAPI sk、8327 兼容层与排障（回看用）。 |
+| `devops` | `subapi-gpt-image2-compat` | SubAPI gpt-image-2：Nginx→8328 错协议转 Images；Responses 流式 `response.completed`；不拼接侧车文案，仅映射官方 `data[0]`。 |
 | `devops` | `linux-outbound-proxy-mihomo` | 通用 Linux 出站代理方案：mihomo 本机代理、订阅/节点处理、应用接入、出口验证、watchdog 故障切换与回退。 |
 | `software-development` | `hermes-self-iteration` | Hermes 自我驱动迭代流程：分析、规划、执行、验证、复盘，适合持续改进项目、服务、文档和工作流。 |
 
