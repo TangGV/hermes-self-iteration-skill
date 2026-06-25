@@ -124,9 +124,10 @@ docker ps --format '{{.Names}}' | grep -i openresty | head -1 | xargs -I{} docke
 
 ## 相关文档
 
+- `references/implementation-record.md` — **做法全记录**（选型、8328、官方返回、回滚）
 - `references/traffic-analysis.md` — 错路径与 `response.completed` 根因
 - `references/nginx-and-deploy.md` — Nginx 片段与部署步骤
-- `scripts/server.py` — 侧车源码副本（与 VPS 同步时以 VPS 为准）
+- `scripts/` — `server.py`、`deploy.sh`、`subapi-image-compat.service`、`nginx-snippet.conf`
 
 ## 与 cursor-subapi-compat 区分
 

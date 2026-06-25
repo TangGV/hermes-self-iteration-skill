@@ -1,0 +1,14 @@
+[Unit]
+Description=SubAPI gpt-image-2 compat (responses/chat -> images/generations)
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/subapi-image-compat
+ExecStart=/usr/bin/python3 /root/subapi-image-compat/server.py
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target
