@@ -31,6 +31,18 @@
 - 请求到了 New API 的 `/v1/chat/completions`，body 无 `messages`
 - Cursor 用了 **`/v1` 而非 `/cursor/v1`**
 
+## call_id string too long（max 64）
+
+上游/New API Responses 校验：
+
+```text
+Invalid 'input[N].call_id': string too long. Expected maximum length 64, but got 83
+```
+
+- **原因**：Cursor Agent 多轮 tool 时 `input[]` 里 `function_call` / `function_call_output` 的 `call_id` 可能超过 64 字符；8327 若原样转发会 400。
+- **修复**（8327 `subapi-cursor-compat`）：`normalize_call_id` + `normalize_responses_input`，对所有 POST JSON 的 `input` 数组在转发前截断为稳定 `call_<sha256>`（≤64）。
+- **处理**：`systemctl restart subapi-cursor-compat`；新开 Agent 会话再试。
+
 ## Agent 不写文件 / 无限调技能
 
 - 兼容层必须把 Responses 的 `function_call`、`function_call_output` 转成 Chat 的 `tool_calls` 与 `role: tool`
