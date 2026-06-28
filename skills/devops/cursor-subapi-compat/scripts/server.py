@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import sys
 import time
@@ -21,7 +22,7 @@ from urllib.request import Request, urlopen
 
 UPSTREAM = "http://127.0.0.1:8317"
 LISTEN = ("127.0.0.1", 8326)
-LOOP_GUARD_TOOL_RESULTS = 8
+DEBUG_SSE_SUMMARY = os.getenv("CURSOR_CPA_DEBUG_SSE", "").lower() in {"1", "true", "yes", "on"}
 
 HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -373,6 +374,8 @@ def responses_sse_to_chat(resp):
             del tail_events[0]
 
     def log_summary(reason, finish):
+        if not DEBUG_SSE_SUMMARY:
+            return
         try:
             sys.stderr.write("%s resp-summary reason=%s finish=%s last=%s events=%s tools=%s tail=%s\n" % (
                 time.strftime("%Y-%m-%dT%H:%M:%S%z"), reason, finish, last_output_kind,
@@ -529,50 +532,6 @@ def audit_request(obj: dict, mode: str) -> str:
     tools = obj.get("tools")
     n_tools = len(tools) if isinstance(tools, list) else 0
     return f"mode={mode} model={obj.get('model') or '?'} stream={bool(obj.get('stream'))} tools={n_tools} tool_choice={obj.get('tool_choice')!r}"
-
-
-def cursor_loop_guard_reason(obj: dict):
-    """Return a reason string when a Cursor request already contains too many tool results.
-
-    This is a safety brake for runaway Agent loops: after many tool outputs are already
-    in the conversation, force a normal ChatCompletions stop instead of asking the model
-    for yet another function_call.
-    """
-    messages = obj.get("messages")
-    if not isinstance(messages, list):
-        return None
-    tool_results = 0
-    assistant_tool_calls = 0
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") == "tool" or msg.get("tool_call_id"):
-            tool_results += 1
-        if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list):
-            assistant_tool_calls += len(msg.get("tool_calls") or [])
-    if tool_results >= LOOP_GUARD_TOOL_RESULTS:
-        return f"tool_results={tool_results} assistant_tool_calls={assistant_tool_calls}"
-    return None
-
-
-def make_loop_guard_chat_response(model, reason, stream=True):
-    content = "Stopped by /cursor/v1 loop guard after repeated tool calls. The bridge returned finish_reason=stop to prevent runaway execution."
-    if stream:
-        chunks = [
-            sse_event(None, chat_chunk("chatcmpl-cursor-cpa-loop-guard", model, {"role": "assistant"})),
-            sse_event(None, chat_chunk("chatcmpl-cursor-cpa-loop-guard", model, {"content": content})),
-            sse_event(None, chat_chunk("chatcmpl-cursor-cpa-loop-guard", model, {}, "stop")),
-            sse_event(None, "[DONE]"),
-        ]
-        return b"".join(chunks), "text/event-stream"
-    payload = {
-        "id": "chatcmpl-cursor-cpa-loop-guard",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), "application/json"
 
 
 class Handler(BaseHTTPRequestHandler):

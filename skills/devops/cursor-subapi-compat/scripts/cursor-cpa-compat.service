@@ -9,6 +9,7 @@ ExecStart=/usr/bin/python3 /root/cursor-cpa-compat/server.py
 Restart=always
 RestartSec=2
 User=root
+Environment=CURSOR_CPA_DEBUG_SSE=0
 
 [Install]
 WantedBy=multi-user.target
