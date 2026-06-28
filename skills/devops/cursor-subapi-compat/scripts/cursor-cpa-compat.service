@@ -1,0 +1,14 @@
+[Unit]
+Description=Cursor compatibility bridge for direct CPA
+After=network.target cliproxyapi.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/cursor-cpa-compat
+ExecStart=/usr/bin/python3 /root/cursor-cpa-compat/server.py
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target
