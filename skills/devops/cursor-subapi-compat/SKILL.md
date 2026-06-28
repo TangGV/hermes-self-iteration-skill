@@ -134,6 +134,7 @@ tail -100 /www/sites/subapi.aigcfast.com/log/access.log | grep cursor/v1
 
 - `references/cursor-settings-checklist.md` — 逐步核对清单
 - `references/cursor-pitfalls.md` — 排障与历史方案对比
+- `references/cursor-cpa-createplan-repeat-20260628.md` — `api.aigcfast.com/cursor/v1` 重复执行排障记录：Responses→Chat SSE 结束条件、message item 文本识别、function_call arguments 去重、CreatePlan 循环分析。
 
 ## 关联 Hermes 本地 skill
 
