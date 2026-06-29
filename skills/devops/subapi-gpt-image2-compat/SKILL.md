@@ -127,6 +127,7 @@ docker ps --format '{{.Names}}' | grep -i openresty | head -1 | xargs -I{} docke
 - `references/implementation-record.md` — **做法全记录**（选型、8328、官方返回、回滚）
 - `references/traffic-analysis.md` — 错路径与 `response.completed` 根因
 - `references/nginx-and-deploy.md` — Nginx 片段与部署步骤
+- `references/codex-responses-stream-passthrough.md` — Codex++ 使用 `/v1` + Responses API 时，非生图流式透传禁止 `resp.read()` 整包缓冲；应逐行 flush SSE。
 - `scripts/` — `server.py`、`deploy.sh`、`subapi-image-compat.service`、`nginx-snippet.conf`
 
 ## 与 cursor-subapi-compat 区分

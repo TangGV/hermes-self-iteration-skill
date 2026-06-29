@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """SubAPI gpt-image-2 gateway: wrong /responses or /chat/completions -> Images API -> protocol-shaped JSON/SSE only (no extra copy)."""
 import base64
+import hashlib
 import json
 import re
 import sys
@@ -22,6 +23,82 @@ HOP = {
     "accept-encoding",
 }
 IMAGE_RE = re.compile(r"^gpt-image", re.I)
+
+
+def normalize_call_id(call_id, fallback_seed=""):
+    s = str(call_id or "").strip()
+    if not s:
+        s = "call_" + hashlib.sha256(str(fallback_seed).encode()).hexdigest()[:32]
+    if len(s) <= 64:
+        return s
+    return "call_" + hashlib.sha256(s.encode()).hexdigest()[:58]
+
+
+def normalize_responses_input(items):
+    if not isinstance(items, list):
+        return items
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            out.append(it)
+            continue
+        it = dict(it)
+        typ = it.get("type")
+        if typ == "function_call":
+            seed = str(it.get("name") or "") + str(it.get("arguments") or "")[:80]
+            it["call_id"] = normalize_call_id(
+                it.get("call_id") or it.get("id") or it.get("tool_call_id"), seed
+            )
+        elif typ in ("function_call_output", "tool_result"):
+            seed = str(it.get("output") or it.get("content") or "")[:80]
+            it["call_id"] = normalize_call_id(
+                it.get("call_id") or it.get("id") or it.get("tool_call_id"), seed
+            )
+        elif typ in (None, "message") and it.get("role") == "tool" and it.get("tool_call_id"):
+            it["tool_call_id"] = normalize_call_id(it.get("tool_call_id"), str(it.get("content"))[:80])
+        else:
+            for key in ("call_id", "tool_call_id"):
+                if key in it and it[key] is not None and len(str(it[key])) > 64:
+                    it[key] = normalize_call_id(it[key], str(typ) + str(it.get("role") or ""))
+        out.append(it)
+    return out
+
+
+def normalize_request_body(data):
+    if not isinstance(data, dict):
+        return data, False
+    changed = False
+    if isinstance(data.get("input"), list):
+        data = dict(data)
+        data["input"] = normalize_responses_input(data["input"])
+        changed = True
+    if isinstance(data.get("messages"), list):
+        data = dict(data) if not changed else data
+        msgs = []
+        for m in data["messages"]:
+            if not isinstance(m, dict):
+                msgs.append(m)
+                continue
+            m = dict(m)
+            if m.get("tool_call_id") and len(str(m["tool_call_id"])) > 64:
+                m["tool_call_id"] = normalize_call_id(m["tool_call_id"], str(m.get("content"))[:80])
+                changed = True
+            if m.get("tool_calls"):
+                tcs = []
+                for tc in m["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        tcs.append(tc)
+                        continue
+                    tc = dict(tc)
+                    if tc.get("id") and len(str(tc["id"])) > 64:
+                        tc["id"] = normalize_call_id(tc["id"], str(tc.get("function"))[:80])
+                        changed = True
+                    tcs.append(tc)
+                m["tool_calls"] = tcs
+            msgs.append(m)
+        if changed:
+            data["messages"] = msgs
+    return data, changed
 
 
 def is_image_model(model):
@@ -82,6 +159,43 @@ def forward_raw(method, path, body, headers):
             return resp.status, dict(resp.headers), resp.read()
     except HTTPError as e:
         return e.code, dict(e.headers), e.read()
+
+
+def send_stream_passthrough(handler, method, path, body, headers):
+    """Proxy upstream SSE without buffering the full response.
+
+    This sidecar exists mainly for gpt-image compatibility, but nginx routes plain
+    /v1/responses and /v1/chat/completions through it too. For non-image streamed
+    Codex/Cursor requests, reading resp.read() first destroys typewriter output and
+    makes clients see one big chunk at the end. Preserve SSE line boundaries here.
+    """
+    hdrs = {k: v for k, v in headers.items() if k.lower() not in HOP}
+    req = Request(UPSTREAM + path, data=body, headers=hdrs, method=method)
+    try:
+        resp = urlopen(req, timeout=3600)
+    except HTTPError as e:
+        body = e.read()
+        handler._respond_raw(e.code, dict(e.headers), body)
+        return
+    with resp:
+        handler.send_response(resp.status)
+        for k, v in resp.headers.items():
+            if k.lower() in HOP or k.lower() == "content-length":
+                continue
+            handler.send_header(k, v)
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        while True:
+            chunk = resp.readline()
+            if not chunk:
+                break
+            try:
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
 
 
 def call_images(auth, model, prompt, size="1024x1024", quality="low"):
@@ -265,8 +379,13 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         try:
             super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception as e:
-            self.send_error(500, str(e))
+            try:
+                self.send_error(500, str(e))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def do_GET(self):
         p = self.path.split("?", 1)[0]
@@ -296,21 +415,34 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
 
         if path not in ("/v1/responses", "/v1/chat/completions"):
-            status, rh, out = forward_raw("POST", self.path, body, dict(self.headers))
+            body2 = body
+            if body:
+                try:
+                    d = json.loads(body.decode("utf-8"))
+                    d, ch = normalize_request_body(d)
+                    if ch:
+                        body2 = json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode()
+                except Exception:
+                    body2 = body
+            status, rh, out = forward_raw("POST", self.path, body2, dict(self.headers))
             self._respond_raw(status, rh, out)
             return
 
         try:
             data = json.loads(body.decode("utf-8")) if body else {}
-        except json.JSONDecodeError:
-            status, rh, out = forward_raw("POST", self.path, body, dict(self.headers))
-            self._respond_raw(status, rh, out)
+        except Exception:
+            self._json_error(400, "invalid json")
             return
+        data, _ = normalize_request_body(data)
+        body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
 
-        model = data.get("model") or ""
+        model = (data.get("model") or "").strip()
         if not is_image_model(model):
-            status, rh, out = forward_raw("POST", self.path, body, dict(self.headers))
-            self._respond_raw(status, rh, out)
+            if client_wants_stream(data, dict(self.headers)):
+                send_stream_passthrough(self, "POST", self.path, body, dict(self.headers))
+            else:
+                status, rh, out = forward_raw("POST", self.path, body, dict(self.headers))
+                self._respond_raw(status, rh, out)
             return
 
         prompt = prompt_from_body(data)
