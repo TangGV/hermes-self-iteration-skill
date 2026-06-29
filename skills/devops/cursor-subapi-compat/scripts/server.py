@@ -31,7 +31,7 @@ HOP = {
 }
 
 MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
-DROP_FOR_RESPONSES = {"stream_options", "metadata"}
+DROP_FOR_RESPONSES = {"metadata"}
 DROP_FOR_CHAT: set[str] = set()
 
 ACTIONABLE_TOOL_HINTS = (
@@ -307,14 +307,37 @@ def sse_event(event, data):
     return f"data: {data}\n\n".encode()
 
 
-def chat_chunk(resp_id, model, delta=None, finish=None):
-    return json.dumps({
+def normalize_usage(usage):
+    """Map Responses token usage to ChatCompletions usage shape for Cursor statistics."""
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion = usage.get("completion_tokens", usage.get("output_tokens"))
+    total = usage.get("total_tokens")
+    if total is None and isinstance(prompt, int) and isinstance(completion, int):
+        total = prompt + completion
+    out = dict(usage)
+    if prompt is not None:
+        out["prompt_tokens"] = prompt
+    if completion is not None:
+        out["completion_tokens"] = completion
+    if total is not None:
+        out["total_tokens"] = total
+    return out if any(k in out for k in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens")) else None
+
+
+def chat_chunk(resp_id, model, delta=None, finish=None, usage=None):
+    chunk = {
         "id": resp_id or "chatcmpl-cursor-cpa-compat",
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
         "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}],
-    }, ensure_ascii=False, separators=(",", ":"))
+    }
+    normalized_usage = normalize_usage(usage)
+    if normalized_usage is not None:
+        chunk["usage"] = normalized_usage
+    return json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
 
 
 def message_item_text(item) -> str:
@@ -348,6 +371,7 @@ def responses_sse_to_chat(resp):
     event_counts = {}
     tool_names_seen = []
     tail_events = []
+    usage_seen = None
 
     def note_event(typ, obj):
         event_counts[typ] = event_counts.get(typ, 0) + 1
@@ -411,6 +435,10 @@ def responses_sse_to_chat(resp):
         if obj.get("model"):
             model = obj.get("model")
         typ = obj.get("type") or event
+        if isinstance(obj.get("usage"), dict):
+            usage_seen = obj.get("usage")
+        if isinstance(obj.get("response"), dict) and isinstance(obj["response"].get("usage"), dict):
+            usage_seen = obj["response"].get("usage")
         note_event(typ, obj)
         if not sent_role:
             yield sse_event(None, chat_chunk(resp_id, model, {"role": "assistant"}))
@@ -476,13 +504,13 @@ def responses_sse_to_chat(resp):
             completed = True
             finish = "tool_calls" if last_output_kind == "tool" else "stop"
             log_summary("response.completed", finish)
-            yield sse_event(None, chat_chunk(resp_id, model, {}, finish))
+            yield sse_event(None, chat_chunk(resp_id, model, {}, finish, usage_seen))
             yield sse_event(None, "[DONE]")
             break
     if not completed:
         finish = "tool_calls" if last_output_kind == "tool" else "stop"
         log_summary("stream_ended_without_response.completed", finish)
-        yield sse_event(None, chat_chunk(resp_id, model, {}, finish))
+        yield sse_event(None, chat_chunk(resp_id, model, {}, finish, usage_seen))
         yield sse_event(None, "[DONE]")
 
 
@@ -523,8 +551,9 @@ def responses_json_to_chat(payload):
         "created": int(obj.get("created_at") or time.time()), "model": obj.get("model"),
         "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
     }
-    if isinstance(obj.get("usage"), dict):
-        chat["usage"] = obj["usage"]
+    usage = normalize_usage(obj.get("usage"))
+    if usage is not None:
+        chat["usage"] = usage
     return json.dumps(chat, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
