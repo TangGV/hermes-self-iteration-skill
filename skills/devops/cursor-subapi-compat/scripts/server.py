@@ -31,6 +31,7 @@ HOP = {
 }
 
 MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
+MODEL_REASONING_ALIASES = {"gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES = {"metadata"}
 DROP_FOR_CHAT: set[str] = set()
 
@@ -91,15 +92,9 @@ def should_force_tool_choice(messages) -> bool:
 
 
 def normalize_reasoning(obj: dict) -> bool:
-    changed = False
-    reasoning = obj.get("reasoning")
-    if isinstance(reasoning, dict) and str(reasoning.get("effort", "")).lower() == "high":
-        reasoning["effort"] = "xhigh"
-        changed = True
-    if str(obj.get("reasoning_effort", "")).lower() == "high":
-        obj["reasoning_effort"] = "xhigh"
-        changed = True
-    return changed
+    # Preserve explicit reasoning difficulty exactly. Model aliases such as
+    # gpt-5.5-extra inject xhigh separately before aliasing the model name.
+    return False
 
 
 def normalize_ids_in_chat(obj: dict) -> bool:
@@ -226,8 +221,14 @@ def make_actionable_nudge():
 def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
     out = dict(obj)
     changed = False
-    if isinstance(out.get("model"), str) and out["model"] in MODEL_ALIASES:
-        out["model"] = MODEL_ALIASES[out["model"]]
+    original_model = out.get("model") if isinstance(out.get("model"), str) else None
+    if original_model in MODEL_REASONING_ALIASES:
+        effort = MODEL_REASONING_ALIASES[original_model]
+        if not out.get("reasoning") and not out.get("reasoning_effort"):
+            out["reasoning"] = {"effort": effort}
+            changed = True
+    if original_model in MODEL_ALIASES:
+        out["model"] = MODEL_ALIASES[original_model]
         changed = True
     changed = normalize_reasoning(out) or changed
     normalize_ids_in_chat(out)
@@ -282,8 +283,14 @@ def normalize_chat_body(raw: bytes) -> tuple[bytes, bool]:
     if not isinstance(obj, dict):
         return raw, False
     changed = False
-    if isinstance(obj.get("model"), str) and obj["model"] in MODEL_ALIASES:
-        obj["model"] = MODEL_ALIASES[obj["model"]]
+    original_model = obj.get("model") if isinstance(obj.get("model"), str) else None
+    if original_model in MODEL_REASONING_ALIASES:
+        effort = MODEL_REASONING_ALIASES[original_model]
+        if not obj.get("reasoning") and not obj.get("reasoning_effort"):
+            obj["reasoning"] = {"effort": effort}
+            changed = True
+    if original_model in MODEL_ALIASES:
+        obj["model"] = MODEL_ALIASES[original_model]
         changed = True
     changed = normalize_reasoning(obj) or changed
     changed = normalize_ids_in_chat(obj) or changed
@@ -560,7 +567,11 @@ def responses_json_to_chat(payload):
 def audit_request(obj: dict, mode: str) -> str:
     tools = obj.get("tools")
     n_tools = len(tools) if isinstance(tools, list) else 0
-    return f"mode={mode} model={obj.get('model') or '?'} stream={bool(obj.get('stream'))} tools={n_tools} tool_choice={obj.get('tool_choice')!r}"
+    reasoning = obj.get("reasoning")
+    if isinstance(reasoning, dict):
+        reasoning = reasoning.get("effort") or reasoning.get("level") or reasoning
+    reasoning = reasoning or obj.get("reasoning_effort")
+    return f"mode={mode} model={obj.get('model') or '?'} stream={bool(obj.get('stream'))} tools={n_tools} tool_choice={obj.get('tool_choice')!r} reasoning={reasoning!r}"
 
 
 class Handler(BaseHTTPRequestHandler):

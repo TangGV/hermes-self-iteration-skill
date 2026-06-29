@@ -31,6 +31,7 @@ HOP = {
 }
 
 MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
+MODEL_REASONING_ALIASES = {"gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES: set[str] = set()
 DROP_FOR_CHAT = {"input", "instructions", "store", "previous_response_id", "truncation", "include", "prompt_cache_retention", "text", "reasoning_summary", "thinking", "thinking_budget"}
 
@@ -220,8 +221,14 @@ def make_actionable_nudge():
 def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
     out = dict(obj)
     changed = False
-    if isinstance(out.get("model"), str) and out["model"] in MODEL_ALIASES:
-        out["model"] = MODEL_ALIASES[out["model"]]
+    original_model = out.get("model") if isinstance(out.get("model"), str) else None
+    if original_model in MODEL_REASONING_ALIASES:
+        effort = MODEL_REASONING_ALIASES[original_model]
+        if not out.get("reasoning") and not out.get("reasoning_effort"):
+            out["reasoning"] = {"effort": effort}
+            changed = True
+    if original_model in MODEL_ALIASES:
+        out["model"] = MODEL_ALIASES[original_model]
         changed = True
     changed = normalize_reasoning(out) or changed
     normalize_ids_in_chat(out)
@@ -276,8 +283,14 @@ def normalize_chat_body(raw: bytes) -> tuple[bytes, bool]:
     if not isinstance(obj, dict):
         return raw, False
     changed = False
-    if isinstance(obj.get("model"), str) and obj["model"] in MODEL_ALIASES:
-        obj["model"] = MODEL_ALIASES[obj["model"]]
+    original_model = obj.get("model") if isinstance(obj.get("model"), str) else None
+    if original_model in MODEL_REASONING_ALIASES:
+        effort = MODEL_REASONING_ALIASES[original_model]
+        if not obj.get("reasoning") and not obj.get("reasoning_effort"):
+            obj["reasoning"] = {"effort": effort}
+            changed = True
+    if original_model in MODEL_ALIASES:
+        obj["model"] = MODEL_ALIASES[original_model]
         changed = True
     changed = normalize_reasoning(obj) or changed
     changed = normalize_ids_in_chat(obj) or changed
@@ -561,6 +574,76 @@ def audit_request(obj: dict, mode: str) -> str:
     return f"mode={mode} model={obj.get('model') or '?'} stream={bool(obj.get('stream'))} tools={n_tools} tool_choice={obj.get('tool_choice')!r} reasoning={reasoning!r}"
 
 
+def _shape_value(v, depth=0):
+    """Safe structural summary: no message text, no credentials."""
+    if depth >= 2:
+        if isinstance(v, dict):
+            return {"type": "dict", "keys": sorted(map(str, v.keys()))[:40]}
+        if isinstance(v, list):
+            return {"type": "list", "len": len(v)}
+        return type(v).__name__
+    if isinstance(v, dict):
+        return {str(k): _shape_value(val, depth + 1) for k, val in list(v.items())[:40] if str(k).lower() not in {"authorization", "api_key", "key", "token"}}
+    if isinstance(v, list):
+        return {"type": "list", "len": len(v), "first": _shape_value(v[0], depth + 1) if v else None}
+    if isinstance(v, str):
+        x = v.strip()
+        if len(x) > 80:
+            x = x[:80] + "…"
+        return {"type": "str", "len": len(v), "sample": x if depth == 0 else ""}
+    return v
+
+
+def find_reasoning_like(obj):
+    hits = []
+    needles = ("reason", "effort", "think", "budget", "verbosity", "intelligence", "mode")
+    def walk(v, path="", depth=0):
+        if depth > 4:
+            return
+        if isinstance(v, dict):
+            for k, val in v.items():
+                ks = str(k)
+                p = f"{path}.{ks}" if path else ks
+                if any(n in ks.lower() for n in needles):
+                    hits.append((p, _shape_value(val)))
+                if ks in ("messages", "input"):
+                    # Avoid logging content; only inspect per-item keys/roles.
+                    if isinstance(val, list):
+                        roles = []
+                        keysets = []
+                        for item in val[:6]:
+                            if isinstance(item, dict):
+                                roles.append(item.get("role") or item.get("type"))
+                                keysets.append(sorted(map(str, item.keys())))
+                        hits.append((p + "._summary", {"len": len(val), "roles": roles, "keysets": keysets}))
+                    continue
+                if ks.lower() in {"content", "text", "arguments", "output"}:
+                    continue
+                walk(val, p, depth + 1)
+        elif isinstance(v, list):
+            for i, item in enumerate(v[:6]):
+                walk(item, f"{path}[{i}]", depth + 1)
+    walk(obj)
+    return hits[:80]
+
+
+def audit_cursor_shape(obj: dict, raw_len: int, path: str) -> str:
+    if not isinstance(obj, dict):
+        return "non_dict"
+    top_keys = sorted(str(k) for k in obj.keys())
+    meta = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else None
+    extra = obj.get("extra_body") if isinstance(obj.get("extra_body"), dict) else None
+    payload = {
+        "path": path,
+        "raw_len": raw_len,
+        "top_keys": top_keys,
+        "metadata_keys": sorted(map(str, meta.keys())) if meta else [],
+        "extra_body_keys": sorted(map(str, extra.keys())) if extra else [],
+        "reasoning_like": find_reasoning_like(obj),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:4000]
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -618,6 +701,8 @@ class Handler(BaseHTTPRequestHandler):
             if raw and upath.endswith("/chat/completions"):
                 try:
                     obj = json.loads(raw.decode("utf-8"))
+                    if isinstance(obj, dict):
+                        self.log_message("cursor-shape %s", audit_cursor_shape(obj, len(raw), upath))
                     if isinstance(obj, dict) and isinstance(obj.get("tools"), list) and obj.get("tools"):
                         body, changed, robj = build_response_request_from_chat(raw)
                         upath = upath.rsplit("/chat/completions", 1)[0] + "/responses"
