@@ -31,7 +31,7 @@ HOP = {
 }
 
 MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
-MODEL_REASONING_ALIASES = {"gpt-5.5-extra": "xhigh"}
+MODEL_REASONING_ALIASES = {"gpt-5.5": "medium", "gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES = {"metadata"}
 DROP_FOR_CHAT: set[str] = set()
 

@@ -16,6 +16,7 @@ import os
 import socket
 import sys
 import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -23,6 +24,9 @@ from urllib.request import Request, urlopen
 UPSTREAM = "http://127.0.0.1:3000"
 LISTEN = ("127.0.0.1", 8327)
 DEBUG_SSE_SUMMARY = os.getenv("CURSOR_COMPAT_DEBUG_SSE", os.getenv("CURSOR_CPA_DEBUG_SSE", "")).lower() in {"1", "true", "yes", "on"}
+CURSOR_FULL_CAPTURE = os.getenv("CURSOR_FULL_CAPTURE", "0").lower() in {"1", "true", "yes", "on"}
+CURSOR_CAPTURE_DIR = Path(os.getenv("CURSOR_CAPTURE_DIR", "/var/log/cursor-full-capture"))
+CURSOR_CAPTURE_MAX_BYTES = int(os.getenv("CURSOR_CAPTURE_MAX_BYTES", "2097152"))
 
 HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -31,7 +35,7 @@ HOP = {
 }
 
 MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
-MODEL_REASONING_ALIASES = {"gpt-5.5-extra": "xhigh"}
+MODEL_REASONING_ALIASES = {"gpt-5.5": "medium", "gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES: set[str] = set()
 DROP_FOR_CHAT = {"input", "instructions", "store", "previous_response_id", "truncation", "include", "prompt_cache_retention", "text", "reasoning_summary", "thinking", "thinking_budget"}
 
@@ -644,6 +648,41 @@ def audit_cursor_shape(obj: dict, raw_len: int, path: str) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:4000]
 
 
+def capture_cursor_body(obj: dict, raw: bytes, path: str):
+    """Temporary full request-body capture for user-authorized debugging.
+    Body only; no HTTP Authorization header. Stores locally on VPS.
+    """
+    if not CURSOR_FULL_CAPTURE or not isinstance(obj, dict):
+        return
+    try:
+        CURSOR_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        rec = {
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "path": path,
+            "raw_len": len(raw),
+            "truncated": len(raw) > CURSOR_CAPTURE_MAX_BYTES,
+            "body": obj,
+        }
+        data = json.dumps(rec, ensure_ascii=False, indent=2)
+        if len(data.encode("utf-8")) > CURSOR_CAPTURE_MAX_BYTES:
+            # Preserve structure enough for analysis but prevent unbounded logs.
+            rec["body"] = obj.copy()
+            if isinstance(rec["body"].get("messages"), list):
+                rec["body"]["messages"] = rec["body"]["messages"][-20:]
+                rec["messages_truncated_to_last"] = 20
+            data = json.dumps(rec, ensure_ascii=False, indent=2)
+        latest = CURSOR_CAPTURE_DIR / "subapi-latest.json"
+        latest.write_text(data, encoding="utf-8")
+        (CURSOR_CAPTURE_DIR / f"subapi-{ts}.json").write_text(data, encoding="utf-8")
+    except Exception as e:
+        try:
+            sys.stderr.write("%s capture-cursor-body failed: %r\n" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e))
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -703,6 +742,7 @@ class Handler(BaseHTTPRequestHandler):
                     obj = json.loads(raw.decode("utf-8"))
                     if isinstance(obj, dict):
                         self.log_message("cursor-shape %s", audit_cursor_shape(obj, len(raw), upath))
+                        capture_cursor_body(obj, raw, upath)
                     if isinstance(obj, dict) and isinstance(obj.get("tools"), list) and obj.get("tools"):
                         body, changed, robj = build_response_request_from_chat(raw)
                         upath = upath.rsplit("/chat/completions", 1)[0] + "/responses"
