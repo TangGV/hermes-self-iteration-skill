@@ -91,15 +91,9 @@ def should_force_tool_choice(messages) -> bool:
 
 
 def normalize_reasoning(obj: dict) -> bool:
-    changed = False
-    reasoning = obj.get("reasoning")
-    if isinstance(reasoning, dict) and str(reasoning.get("effort", "")).lower() == "high":
-        reasoning["effort"] = "xhigh"
-        changed = True
-    if str(obj.get("reasoning_effort", "")).lower() == "high":
-        obj["reasoning_effort"] = "xhigh"
-        changed = True
-    return changed
+    # Preserve Cursor/New API reasoning difficulty exactly. In particular, do not
+    # upgrade high -> xhigh; the user expects high to remain high end-to-end.
+    return False
 
 
 def normalize_ids_in_chat(obj: dict) -> bool:
@@ -560,7 +554,11 @@ def responses_json_to_chat(payload):
 def audit_request(obj: dict, mode: str) -> str:
     tools = obj.get("tools")
     n_tools = len(tools) if isinstance(tools, list) else 0
-    return f"mode={mode} model={obj.get('model') or '?'} stream={bool(obj.get('stream'))} tools={n_tools} tool_choice={obj.get('tool_choice')!r}"
+    reasoning = obj.get("reasoning")
+    if isinstance(reasoning, dict):
+        reasoning = reasoning.get("effort") or reasoning.get("level") or reasoning
+    reasoning = reasoning or obj.get("reasoning_effort")
+    return f"mode={mode} model={obj.get('model') or '?'} stream={bool(obj.get('stream'))} tools={n_tools} tool_choice={obj.get('tool_choice')!r} reasoning={reasoning!r}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -675,7 +673,7 @@ class Handler(BaseHTTPRequestHandler):
                             self.wfile.write(c); self.wfile.flush()
                         except (BrokenPipeError, ConnectionResetError, OSError):
                             break
-                    self.log_message("resp-audit mode=%s has_tool_calls=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s", mode, saw_tool, finish_seen, ",".join(tool_names), chunk_count, len(buf))
+                    self.log_message("resp-audit mode=%s has_tool_calls=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s", mode, saw_tool, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf)
                 else:
                     payload = resp.read()
                     if response_mode == "responses-to-chat":
