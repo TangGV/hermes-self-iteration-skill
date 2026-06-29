@@ -134,6 +134,7 @@ tail -100 /www/sites/subapi.aigcfast.com/log/access.log | grep cursor/v1
 
 - `references/cursor-settings-checklist.md` — 逐步核对清单
 - `references/cursor-pitfalls.md` — 排障与历史方案对比
+- `references/cursor-reasoning-model-alias-and-body-capture.md` — Cursor `/cursor/v1` 不显式传 `reasoning_effort` / MAX / 1M 字段时的全量 body 捕获分析；Codex `/v1` 会显式走 Responses reasoning；当前映射 `gpt-5.5→high`、`gpt-5.5-extra→xhigh`。
 - `references/cursor-cpa-createplan-repeat-20260628.md` — `api.aigcfast.com/cursor/v1` 重复执行排障记录：Responses→Chat SSE 结束条件、message item 文本识别、function_call arguments 去重、CreatePlan 循环分析。
 - `references/cursor-cpa-solution-summary-20260628.md` — Cursor 调 CPA `/cursor/v1` 的最终问题总结、正确处理流程、分析方法与流式验证。
 

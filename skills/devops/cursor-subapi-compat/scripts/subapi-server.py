@@ -35,7 +35,7 @@ HOP = {
 }
 
 MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
-MODEL_REASONING_ALIASES = {"gpt-5.5": "medium", "gpt-5.5-extra": "xhigh"}
+MODEL_REASONING_ALIASES = {"gpt-5.5": "high", "gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES: set[str] = set()
 DROP_FOR_CHAT = {"input", "instructions", "store", "previous_response_id", "truncation", "include", "prompt_cache_retention", "text", "reasoning_summary", "thinking", "thinking_budget"}
 
