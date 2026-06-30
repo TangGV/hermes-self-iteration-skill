@@ -791,3 +791,7 @@ external-controller: 127.0.0.1:9090
 - [ ] 代理失败时能切换节点或触发回退 hook。
 - [ ] 代理恢复后能触发恢复 hook。
 - [ ] 代理端口未暴露公网。
+
+## 实战案例 / 参考
+
+- `references/vps2-tw-home-proxy-cpa-newapi.md` — VPS2 台湾家宽出站代理接入 CPA/New API/翻译层：订阅更新、台湾节点测速、`TW_HOME` 切换、CPA `proxy-url`、Docker New API 代理环境、`172.17.0.1` 必须加入 `NO_PROXY` 防止本机 CPA 请求误走代理导致 500。
