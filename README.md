@@ -103,6 +103,7 @@ skills/
 | 分类 | Skill | 作用 |
 |---|---|---|
 | `devops` | `cursor-subapi-compat` | Cursor IDE 接 `api.aigcfast.com` / `subapi.aigcfast.com` 的 `/cursor/v1` 兼容层、CPA/SubAPI 路由、call_id、Responses↔ChatCompletions 工具桥接与排障。 |
+| `devops` | `new-api-admin-ops` | New API/SubAPI 面板、计费、模型、令牌、日志与 nginx/API 路由排障；包含 `/v1/responses` 413 active-DNS-host 修复记录。 |
 | `devops` | `subapi-gpt-image2-compat` | SubAPI `gpt-image-2` 文生图/图生图兼容：Nginx→8328、Images API 映射、官方 JSON 返回、非聊天路径边界。 |
 | `devops` | `linux-outbound-proxy-mihomo` | 通用 Linux 出站代理方案：mihomo 本机代理、订阅/节点处理、应用接入、出口验证、watchdog 与回退。 |
 | `software-development` | `hermes-self-iteration` | Hermes 自我驱动迭代流程：分析、规划、执行、验证、复盘，适合持续改进服务、文档和工作流。 |
