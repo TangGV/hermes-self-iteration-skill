@@ -43,6 +43,29 @@ Invalid 'input[N].call_id': string too long. Expected maximum length 64, but got
 - **修复**（8327 `subapi-cursor-compat`）：`normalize_call_id` + `normalize_responses_input`，对所有 POST JSON 的 `input` 数组在转发前截断为稳定 `call_<sha256>`（≤64）。
 - **处理**：`systemctl restart subapi-cursor-compat`；新开 Agent 会话再试。
 
+## Context Usage 0% / 被重置
+
+- Cursor Context Usage 面板不等价于服务端 `raw_len`。服务端可能看到 174KB～1.1MB，面板仍显示 0%。
+- 本地反编译确认 UI 主要由 `conversationState.tokenDetails.usedTokens/maxTokens` → `contextUsagePercent/contextTokensUsed/contextTokenLimit` 驱动。
+- OpenAI-compatible usage 仍会影响递增统计，但必须按标准流式格式输出：**只在最后一条 `choices: []` chunk 带 `usage`**。
+- **不要**在 finish chunk 和 final chunk 双写 usage；双写会导致 Cursor 重新刷新/覆盖，用户观察到会重置。
+
+正确形态：
+
+```text
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+data: {"choices":[],"usage":{"prompt_tokens":...,"completion_tokens":...,"total_tokens":...}}
+data: [DONE]
+```
+
+验证日志：
+
+```text
+resp-audit ... usage_seen=True usage_out=True usage_fallback=False
+```
+
+详见：`references/cursor-context-usage-openai-usage-chunk-20260701.md`。
+
 ## Agent 不写文件 / 无限调技能
 
 - 兼容层必须把 Responses 的 `function_call`、`function_call_output` 转成 Chat 的 `tool_calls` 与 `role: tool`
