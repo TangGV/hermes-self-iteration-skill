@@ -30,7 +30,10 @@ HOP = {
     "host", "accept-encoding",
 }
 
-MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
+MODEL_ALIASES = {
+    "gpt-5.5-extra": "gpt-5.5",
+    "gpt-5.4": "grok-composer-2.5-fast",
+}
 MODEL_REASONING_ALIASES = {"gpt-5.5": "high", "gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES = {"metadata"}
 DROP_FOR_CHAT: set[str] = set()

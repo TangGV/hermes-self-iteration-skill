@@ -34,7 +34,10 @@ HOP = {
     "host", "accept-encoding",
 }
 
-MODEL_ALIASES = {"gpt-5.5-extra": "gpt-5.5"}
+MODEL_ALIASES = {
+    "gpt-5.5-extra": "gpt-5.5",
+    "gpt-5.4": "grok-composer-2.5-fast",
+}
 MODEL_REASONING_ALIASES = {"gpt-5.5": "high", "gpt-5.5-extra": "xhigh"}
 DROP_FOR_RESPONSES: set[str] = set()
 DROP_FOR_CHAT = {"input", "instructions", "store", "previous_response_id", "truncation", "include", "prompt_cache_retention", "text", "reasoning_summary", "thinking", "thinking_budget"}
@@ -337,6 +340,71 @@ def normalize_usage(usage):
     return out if any(k in out for k in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens")) else None
 
 
+def _rough_token_estimate(text: str) -> int:
+    """Conservative rough estimate for UI-only usage fallback; not used for billing."""
+    if not text:
+        return 0
+    # Mixed Chinese/code/JSON tends to be closer than raw len/4 alone. Keep it
+    # conservative so Cursor sees non-zero usage without wildly overstating.
+    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    return max(1, int(ascii_chars / 4 + non_ascii_chars * 1.5))
+
+
+def estimate_chat_prompt_usage(obj: dict, raw_len: int = 0):
+    """Best-effort prompt usage for Cursor UI when upstream omits usage.
+
+    Cursor Context Usage is not guaranteed to consume OpenAI usage, but if it
+    does, it expects a standard usage chunk. This estimate is response-facing
+    only; SubAPI/NewAPI billing still uses upstream usage.
+    """
+    if not isinstance(obj, dict):
+        return None
+    total = 0
+    for msg in obj.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        total += 4
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += _rough_token_estimate(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    total += _rough_token_estimate(part)
+                elif isinstance(part, dict):
+                    total += _rough_token_estimate(str(part.get("text") or part.get("content") or part.get("image_url") or ""))
+        if isinstance(msg.get("tool_calls"), list):
+            total += _rough_token_estimate(json.dumps(msg.get("tool_calls"), ensure_ascii=False, separators=(",", ":")))
+        if msg.get("name"):
+            total += 1
+    tools = obj.get("tools")
+    if isinstance(tools, list) and tools:
+        total += _rough_token_estimate(json.dumps(tools, ensure_ascii=False, separators=(",", ":")))
+    # Account for JSON/system wrapper overhead. raw_len fallback prevents 0 on
+    # unusual payloads where content is nested differently.
+    raw_est = max(0, int(raw_len / 5)) if raw_len else 0
+    prompt = max(total, raw_est)
+    if prompt <= 0:
+        return None
+    return {"prompt_tokens": int(prompt), "completion_tokens": 0, "total_tokens": int(prompt)}
+
+
+def chat_usage_chunk(resp_id, model, usage):
+    normalized_usage = normalize_usage(usage)
+    if normalized_usage is None:
+        return None
+    chunk = {
+        "id": resp_id or "chatcmpl-cursor-compat",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": normalized_usage,
+    }
+    return json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+
+
 def chat_chunk(resp_id, model, delta=None, finish=None, usage=None):
     chunk = {
         "id": resp_id or "chatcmpl-cursor-compat",
@@ -367,7 +435,7 @@ def message_item_text(item) -> str:
     return "".join(parts)
 
 
-def responses_sse_to_chat(resp):
+def responses_sse_to_chat(resp, fallback_usage=None):
     resp_id = "chatcmpl-cursor-compat"
     model = None
     event = ""
@@ -516,12 +584,18 @@ def responses_sse_to_chat(resp):
             finish = "tool_calls" if last_output_kind == "tool" else "stop"
             log_summary("response.completed", finish)
             yield sse_event(None, chat_chunk(resp_id, model, {}, finish, usage_seen))
+            usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
+            if usage_chunk:
+                yield sse_event(None, usage_chunk)
             yield sse_event(None, "[DONE]")
             break
     if not completed:
         finish = "tool_calls" if last_output_kind == "tool" else "stop"
         log_summary("stream_ended_without_response.completed", finish)
         yield sse_event(None, chat_chunk(resp_id, model, {}, finish, usage_seen))
+        usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
+        if usage_chunk:
+            yield sse_event(None, usage_chunk)
         yield sse_event(None, "[DONE]")
 
 
@@ -733,6 +807,7 @@ class Handler(BaseHTTPRequestHandler):
         changed = False
         mode = "direct-subapi"
         response_mode = "passthrough"
+        fallback_usage = None
         if method in {"POST", "PUT", "PATCH"}:
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n) if n else b""
@@ -743,6 +818,7 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(obj, dict):
                         self.log_message("cursor-shape %s", audit_cursor_shape(obj, len(raw), upath))
                         capture_cursor_body(obj, raw, upath)
+                        fallback_usage = estimate_chat_prompt_usage(obj, len(raw))
                     if isinstance(obj, dict) and isinstance(obj.get("tools"), list) and obj.get("tools"):
                         body, changed, robj = build_response_request_from_chat(raw)
                         upath = upath.rsplit("/chat/completions", 1)[0] + "/responses"
@@ -770,7 +846,9 @@ class Handler(BaseHTTPRequestHandler):
                     finish_seen = None
                     tool_names = []
                     chunk_count = 0
-                    for c in responses_sse_to_chat(resp):
+                    usage_out = False
+                    usage_fallback_out = False
+                    for c in responses_sse_to_chat(resp, fallback_usage=fallback_usage):
                         chunk_count += 1
                         if len(buf) < cap:
                             buf.extend(c[: cap - len(buf)])
@@ -787,6 +865,10 @@ class Handler(BaseHTTPRequestHandler):
                                 fr = choice.get("finish_reason")
                                 if fr:
                                     finish_seen = fr
+                                if isinstance(o.get("usage"), dict):
+                                    usage_out = True
+                                    if fallback_usage and o.get("usage") == normalize_usage(fallback_usage):
+                                        usage_fallback_out = True
                                 delta = choice.get("delta") or {}
                                 for tc in delta.get("tool_calls") or []:
                                     fn = (tc.get("function") or {}).get("name")
@@ -798,7 +880,7 @@ class Handler(BaseHTTPRequestHandler):
                             self.wfile.write(c); self.wfile.flush()
                         except (BrokenPipeError, ConnectionResetError, OSError):
                             break
-                    self.log_message("resp-audit mode=%s has_tool_calls=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s", mode, saw_tool, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf)
+                    self.log_message("resp-audit mode=%s has_tool_calls=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s", mode, saw_tool, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out)
                 else:
                     payload = resp.read()
                     if response_mode == "responses-to-chat":
