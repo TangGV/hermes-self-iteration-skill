@@ -47,14 +47,16 @@ Invalid 'input[N].call_id': string too long. Expected maximum length 64, but got
 
 - Cursor Context Usage 面板不等价于服务端 `raw_len`。服务端可能看到 174KB～1.1MB，面板仍显示 0%。
 - 本地反编译确认 UI 主要由 `conversationState.tokenDetails.usedTokens/maxTokens` → `contextUsagePercent/contextTokensUsed/contextTokenLimit` 驱动。
-- OpenAI-compatible usage 仍会影响递增统计，但必须按标准流式格式输出：**只在最后一条 `choices: []` chunk 带 `usage`**。
+- OpenAI-compatible usage 最终有效模式：`CURSOR_EMIT_USAGE_PREROLL=1`、`CURSOR_EMIT_USAGE_CHUNK=0`。
+- 即在模型开始输出前先发一条估算 `choices: [] + usage`，结尾不再发 usage；这样过程里有统计，结束不覆盖。
 - **不要**在 finish chunk 和 final chunk 双写 usage；双写会导致 Cursor 重新刷新/覆盖，用户观察到会重置。
 
 正确形态：
 
 ```text
+data: {"choices":[],"usage":{"prompt_tokens":...,"completion_tokens":0,"total_tokens":...}}
+data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}
 data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
-data: {"choices":[],"usage":{"prompt_tokens":...,"completion_tokens":...,"total_tokens":...}}
 data: [DONE]
 ```
 

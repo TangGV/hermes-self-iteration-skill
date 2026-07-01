@@ -24,6 +24,12 @@ from urllib.request import Request, urlopen
 UPSTREAM = "http://127.0.0.1:3000"
 LISTEN = ("127.0.0.1", 8327)
 DEBUG_SSE_SUMMARY = os.getenv("CURSOR_COMPAT_DEBUG_SSE", os.getenv("CURSOR_CPA_DEBUG_SSE", "")).lower() in {"1", "true", "yes", "on"}
+# Off by default: OpenAI final usage chunks make Cursor usage increment, but can
+# also overwrite Cursor's internal Context Usage panel. Enable only for tests.
+CURSOR_EMIT_USAGE_CHUNK = os.getenv("CURSOR_EMIT_USAGE_CHUNK", "0").lower() in {"1", "true", "yes", "on"}
+# Experimental: emit one estimated usage chunk before the model stream starts so
+# Cursor can show context during generation. Keep off unless explicitly testing.
+CURSOR_EMIT_USAGE_PREROLL = os.getenv("CURSOR_EMIT_USAGE_PREROLL", "0").lower() in {"1", "true", "yes", "on"}
 CURSOR_FULL_CAPTURE = os.getenv("CURSOR_FULL_CAPTURE", "0").lower() in {"1", "true", "yes", "on"}
 CURSOR_CAPTURE_DIR = Path(os.getenv("CURSOR_CAPTURE_DIR", "/var/log/cursor-full-capture"))
 CURSOR_CAPTURE_MAX_BYTES = int(os.getenv("CURSOR_CAPTURE_MAX_BYTES", "2097152"))
@@ -451,6 +457,14 @@ def responses_sse_to_chat(resp, fallback_usage=None):
     tool_names_seen = []
     tail_events = []
     usage_seen = None
+    preroll_usage_sent = False
+
+    def maybe_emit_preroll_usage():
+        nonlocal preroll_usage_sent
+        if preroll_usage_sent or not CURSOR_EMIT_USAGE_PREROLL:
+            return None
+        preroll_usage_sent = True
+        return chat_usage_chunk(resp_id, model, fallback_usage)
 
     def note_event(typ, obj):
         event_counts[typ] = event_counts.get(typ, 0) + 1
@@ -520,6 +534,9 @@ def responses_sse_to_chat(resp, fallback_usage=None):
             usage_seen = obj["response"].get("usage")
         note_event(typ, obj)
         if not sent_role:
+            preroll = maybe_emit_preroll_usage()
+            if preroll:
+                yield sse_event(None, preroll)
             yield sse_event(None, chat_chunk(resp_id, model, {"role": "assistant"}))
             sent_role = True
         if typ in ("response.output_text.delta", "response.refusal.delta"):
@@ -584,18 +601,20 @@ def responses_sse_to_chat(resp, fallback_usage=None):
             finish = "tool_calls" if last_output_kind == "tool" else "stop"
             log_summary("response.completed", finish)
             yield sse_event(None, chat_chunk(resp_id, model, {}, finish))
-            usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
-            if usage_chunk:
-                yield sse_event(None, usage_chunk)
+            if CURSOR_EMIT_USAGE_CHUNK and not preroll_usage_sent:
+                usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
+                if usage_chunk:
+                    yield sse_event(None, usage_chunk)
             yield sse_event(None, "[DONE]")
             break
     if not completed:
         finish = "tool_calls" if last_output_kind == "tool" else "stop"
         log_summary("stream_ended_without_response.completed", finish)
         yield sse_event(None, chat_chunk(resp_id, model, {}, finish))
-        usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
-        if usage_chunk:
-            yield sse_event(None, usage_chunk)
+        if CURSOR_EMIT_USAGE_CHUNK and not preroll_usage_sent:
+            usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
+            if usage_chunk:
+                yield sse_event(None, usage_chunk)
         yield sse_event(None, "[DONE]")
 
 

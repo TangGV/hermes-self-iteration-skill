@@ -51,9 +51,9 @@ Cursor UI 的 Context Usage 优先取：
 
 但普通 OpenAI usage 并不是 Cursor Context Usage 的唯一来源；它能影响递增统计，但不会提供完整 `promptContextUsageTree`。
 
-## 修正方案
+## 修正方案演进
 
-### 第一版：补流尾 usage chunk
+### 第一版：补流尾 usage chunk（实验）
 
 在 `subapi-server.py` 的 Responses→Chat SSE 转换中，增加标准 OpenAI 流式 usage chunk：
 
@@ -156,11 +156,13 @@ usage_seen=True usage_out=True usage_fallback=True
 
 ## 关键注意事项
 
-1. **不要**在 finish chunk 和 final usage chunk 双写 usage。
-2. **保留**最终 `choices: []` usage chunk，这是 Cursor 递增统计生效的关键。
-3. `estimate_chat_prompt_usage()` 的估算 usage **只用于响应给 Cursor UI**，不得用于计费。
-4. `Context Usage` 仍可能不等价于服务端 `raw_len`，大请求保护仍应看 `cursor-shape raw_len`。
-5. 对 `gpt-5.5-extra + xhigh + 大 body` 仍要警惕空流；usage chunk 只能帮助 UI 统计，不保证模型返回正文。
+1. **最终有效方案**：现网开启 `CURSOR_EMIT_USAGE_PREROLL=1`、关闭 `CURSOR_EMIT_USAGE_CHUNK=0`。
+2. 形态是：模型开始输出前先发一条估算 `choices: [] + usage`，后续正常流，结尾不再发 usage。这样 Cursor 过程里能先看到上下文统计，结束时也不会再次覆盖。
+3. **不要**在 finish chunk 和 final chunk 双写 usage；双写会导致 Cursor 重新刷新/覆盖，用户观察到会重置。
+4. **不要**只在最后 `choices: []` 发 usage；用户确认这种方案“结束才有统计”，且仍可能覆盖 Cursor 自己的 K 级统计。
+5. `estimate_chat_prompt_usage()` 的估算 usage **只用于响应给 Cursor UI**，不得用于计费。
+6. `Context Usage` 仍可能不等价于服务端 `raw_len`，大请求保护仍应看 `cursor-shape raw_len`。
+7. 对 `gpt-5.5-extra + xhigh + 大 body` 仍要警惕空流；usage chunk 只能帮助某些 UI 统计，不保证模型返回正文。
 
 ## 当前部署
 
