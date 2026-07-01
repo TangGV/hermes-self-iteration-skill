@@ -583,7 +583,7 @@ def responses_sse_to_chat(resp, fallback_usage=None):
             completed = True
             finish = "tool_calls" if last_output_kind == "tool" else "stop"
             log_summary("response.completed", finish)
-            yield sse_event(None, chat_chunk(resp_id, model, {}, finish, usage_seen))
+            yield sse_event(None, chat_chunk(resp_id, model, {}, finish))
             usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
             if usage_chunk:
                 yield sse_event(None, usage_chunk)
@@ -592,7 +592,7 @@ def responses_sse_to_chat(resp, fallback_usage=None):
     if not completed:
         finish = "tool_calls" if last_output_kind == "tool" else "stop"
         log_summary("stream_ended_without_response.completed", finish)
-        yield sse_event(None, chat_chunk(resp_id, model, {}, finish, usage_seen))
+        yield sse_event(None, chat_chunk(resp_id, model, {}, finish))
         usage_chunk = chat_usage_chunk(resp_id, model, usage_seen or fallback_usage)
         if usage_chunk:
             yield sse_event(None, usage_chunk)
