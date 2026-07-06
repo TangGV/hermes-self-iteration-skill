@@ -262,9 +262,18 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
             messages = [make_actionable_nudge()] + messages
             changed = True
     resp = {}
-    for k in ("model", "stream", "temperature", "top_p", "reasoning", "reasoning_effort", "service_tier", "user"):
+    for k in ("model", "stream", "temperature", "top_p", "reasoning", "reasoning_effort", "service_tier", "user", "prompt_cache_key"):
         if k in out:
             resp[k] = out[k]
+    # Cursor custom-OpenAI requests usually do not include Codex's prompt_cache_key.
+    # New API/CPA use prompt_cache_key to keep channel affinity and provider-side
+    # prompt cache stable. Without it, Cursor /cursor/v1 can round-robin across
+    # accounts and repeatedly miss cache, causing multi-minute xhigh turns.
+    if not resp.get("prompt_cache_key"):
+        user_key = out.get("user") if isinstance(out.get("user"), str) and out.get("user") else ""
+        if user_key:
+            resp["prompt_cache_key"] = "cursor:" + hashlib.sha256((str(resp.get("model") or original_model or "") + ":" + user_key).encode("utf-8")).hexdigest()[:24]
+            changed = True
     if "max_output_tokens" in out:
         resp["max_output_tokens"] = out["max_output_tokens"]
     elif "max_tokens" in out:
