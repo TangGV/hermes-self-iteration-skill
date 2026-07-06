@@ -109,6 +109,7 @@ curl --request GET \
 | 立刻断开、8327 无日志 | Base 写成 `/v1`、`/cusor/v1` 或缓存旧配置 | 改 URL + 新会话 |
 | Agent 无限调 tool | 兼容层未保留 `function_call` / `tool_result` 历史 | 查 `server.py` 的 `input_to_messages`，见 `references/cursor-pitfalls.md` |
 | `gpt-image-2` 503 | 用 chat/responses 调了生图模型 | 生图改 `POST /v1/images/generations`（同一 sk，**不必**走 `/cursor/v1`） |
+| `/cursor/v1` xhigh 超长等待，但 Codex CLI 更大上下文正常 | Cursor 自定义 OpenAI 请求缺 `prompt_cache_key`，New API 无 `channel_affinity`，provider cache 不稳定 | 在 `chat_to_responses_payload()` 保留/合成 `prompt_cache_key`；验证 `logs.other.admin_info.channel_affinity.key_path=prompt_cache_key` |
 
 ## 刻意不走 SubAPI 分发时（对照，非 Cursor 默认）
 
