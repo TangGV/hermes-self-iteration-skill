@@ -23,7 +23,11 @@ Cursor Plan compatibility instruction: this conversation already has an existing
 
 This preserves official Cursor semantics: use `CreatePlan`, but keep `args.name` stable.
 
-Do **not** attach `metadata` on the upstream `/v1/responses` body — New API/upstream returns `Unsupported parameter: metadata`. Plan-update behavior relies on the injected system nudge only.
+If the conversation already contains a prior `CreatePlan` tool call, the bridge now **always** injects the compatibility nudge on follow-up turns (unless the user explicitly asks for a new plan). Keywords like **优化** are included; you do not need to say “不要新建”.
+
+On the response path, when a plan lock name is active, the bridge also **rewrites outgoing `CreatePlan` tool `arguments.name`** to the locked plan title so Cursor’s plan manager updates in place even if the model invents a new name.
+
+For plan panel typing effect, large upstream text/tool-argument chunks are split into smaller ChatCompletions SSE deltas (~24 chars) before forwarding to Cursor.
 
 ## Verification command
 
@@ -112,4 +116,41 @@ scp skills/devops/cursor-subapi-compat/scripts/subapi-server.py root@82.158.91.1
 ssh root@82.158.91.156 'cd /root/subapi-cursor-compat && python3 -m py_compile server.py && systemctl restart subapi-cursor-compat && systemctl is-active subapi-cursor-compat'
 ```
 
-If SSH is unavailable (`Connection timed out during banner exchange`), do not restart other services as a workaround. Wait for SSH to recover or access through an approved out-of-band path.
+If OpenSSH reports `Connection timed out during banner exchange`, first distinguish a real host outage from an OpenSSH/client-path flake:
+
+```bash
+python - <<'PY'
+import socket
+s=socket.create_connection(('82.158.91.156', 22), timeout=8)
+s.settimeout(5)
+print(s.recv(80))
+s.close()
+PY
+```
+
+If the raw TCP banner is returned but `ssh/scp` still time out, a Paramiko+SFTP deploy path can be used instead of waiting or touching unrelated services:
+
+```python
+import paramiko, pathlib
+host='82.158.91.156'
+key=paramiko.Ed25519Key.from_private_key_file(r'C:\Users\t\.ssh\id_ed25519')
+cli=paramiko.SSHClient(); cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+cli.connect(host, username='root', pkey=key, timeout=10, banner_timeout=10, auth_timeout=10, look_for_keys=False, allow_agent=False)
+
+def run(cmd):
+    stdin, stdout, stderr = cli.exec_command(cmd, timeout=60)
+    out, err = stdout.read().decode(), stderr.read().decode()
+    rc = stdout.channel.recv_exit_status()
+    if rc: raise RuntimeError((cmd, rc, out, err))
+    return out
+
+run('cd /root/subapi-cursor-compat && cp server.py server.py.bak-$(date +%Y%m%d-%H%M%S)')
+sftp=cli.open_sftp()
+sftp.put(r'C:\Users\t\AppData\Local\hermes\skills\devops\cursor-subapi-compat\scripts\subapi-server.py', '/root/subapi-cursor-compat/server.py')
+sftp.close()
+run('cd /root/subapi-cursor-compat && python3 -m py_compile server.py')
+run('systemctl restart subapi-cursor-compat && sleep 2 && systemctl is-active subapi-cursor-compat')
+cli.close()
+```
+
+Still do not restart New API/CPA or do broad host recovery for this fix; the scope is only `subapi-cursor-compat`.

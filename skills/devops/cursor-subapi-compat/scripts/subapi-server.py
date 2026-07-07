@@ -286,6 +286,12 @@ def _extract_plan_names_from_messages(messages) -> list[str]:
             name = args.get("name")
             if isinstance(name, str) and name.strip():
                 names.append(name.strip())
+        if msg.get("role") == "tool":
+            args = _safe_json_obj(msg.get("content"))
+            if isinstance(args, dict):
+                name = args.get("name") or args.get("planName") or args.get("title")
+                if isinstance(name, str) and name.strip():
+                    names.append(name.strip())
         # Some Cursor/agent traces embed tool calls/results as JSON-ish text.
         txt = _message_text_for_plan_hint(msg)
         if "createPlan" in txt or "CreatePlan" in txt or "createPlanToolCall" in txt:
@@ -310,6 +316,65 @@ def _latest_user_text(messages) -> str:
     return ""
 
 
+def _user_wants_new_plan(text: str) -> bool:
+    if not text:
+        return False
+    markers = (
+        "新建计划", "新计划", "另一个计划", "重新制定", "重新创建", "从零", "另起",
+        "new plan", "another plan", "from scratch", "start over",
+    )
+    low = text.lower()
+    return any(m.lower() in low for m in markers)
+
+
+def _conversation_has_createplan_history(messages) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            if _is_plan_function_name(str(fn.get("name") or "")):
+                return True
+        txt = _message_text_for_plan_hint(msg)
+        if "createPlan" in txt or "CreatePlan" in txt or "createPlanToolCall" in txt:
+            return True
+    return False
+
+
+PLAN_SSE_CHAR_CHUNK = 24
+
+
+def _iter_char_chunks(text: str, size: int = PLAN_SSE_CHAR_CHUNK):
+    if not text:
+        return
+    for i in range(0, len(text), max(1, int(size))):
+        yield text[i : i + size]
+
+
+def _fix_createplan_arguments_text(arg_text: str, tool_name: str, plan_lock_name: str) -> str:
+    if not arg_text or not plan_lock_name or not _is_plan_function_name(tool_name):
+        return arg_text
+    try:
+        obj = json.loads(arg_text)
+    except Exception:
+        obj = None
+    if isinstance(obj, dict) and "name" in obj:
+        if str(obj.get("name") or "").strip() != plan_lock_name:
+            obj["name"] = plan_lock_name
+            return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        return arg_text
+    return re.sub(
+        r'"name"\s*:\s*"(?:[^"\\]|\\.)*"',
+        '"name":' + json.dumps(plan_lock_name, ensure_ascii=False),
+        arg_text,
+        count=1,
+    )
+
+
 def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
     if not plan_name or not isinstance(obj, dict):
         return False
@@ -325,11 +390,19 @@ def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
                 break
     if not has_plan_tool:
         return False
-    text = _latest_user_text(obj.get("messages"))
+    messages = obj.get("messages")
+    text = _latest_user_text(messages)
+    if _user_wants_new_plan(text):
+        return False
+    # Official Cursor plan --continue updates reuse args.name even without explicit "do not create".
+    if _conversation_has_createplan_history(messages):
+        return True
     markers = (
-        "修改", "更新", "改一下", "调整", "迭代", "原计划", "已有计划",
+        "修改", "更新", "优化", "完善", "改进", "润色", "补充", "细化", "调整", "迭代",
+        "原计划", "已有计划", "继续", "在此基础上",
         "不要新建", "别新建", "不要重新创建", "same plan", "existing plan",
         "original plan", "update the plan", "modify the plan", "revise the plan",
+        "optimize the plan", "refine the plan", "improve the plan",
     )
     return any(m.lower() in text.lower() for m in markers)
 
@@ -348,7 +421,7 @@ def make_plan_update_nudge(plan_name: str):
     }
 
 
-def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
+def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
     out = dict(obj)
     changed = False
     original_model = out.get("model") if isinstance(out.get("model"), str) else None
@@ -376,6 +449,12 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
     plan_names = _extract_plan_names_from_messages(messages)
     plan_update_name = plan_names[-1] if plan_names else ""
     add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
+    plan_lock_name = ""
+    if plan_update_name and add_plan_nudge:
+        plan_lock_name = plan_update_name
+    elif plan_update_name and _conversation_has_createplan_history(messages) and not _user_wants_new_plan(_latest_user_text(messages)):
+        plan_lock_name = plan_update_name
+        add_plan_nudge = True
     if force_initial_tool and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Agent compatibility instruction" in m.get("content", "") for m in messages)
         if not already:
@@ -420,7 +499,7 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
             resp["tool_choice"] = "auto" if out.get("tool_choice") == "required" else out.get("tool_choice")
     for k in DROP_FOR_RESPONSES:
         resp.pop(k, None)
-    return resp, True
+    return resp, changed, plan_lock_name
 
 
 def normalize_chat_body(raw: bytes) -> tuple[bytes, bool]:
@@ -452,10 +531,10 @@ def normalize_chat_body(raw: bytes) -> tuple[bytes, bool]:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), True
 
 
-def build_response_request_from_chat(raw: bytes) -> tuple[bytes, bool, dict]:
+def build_response_request_from_chat(raw: bytes) -> tuple[bytes, bool, dict, str]:
     obj = json.loads(raw.decode("utf-8"))
-    resp, changed = chat_to_responses_payload(obj)
-    return json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, resp
+    resp, changed, plan_lock_name = chat_to_responses_payload(obj)
+    return json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, resp, plan_lock_name
 
 
 def salted_retry_body(body: bytes, reason: str = "empty") -> bytes:
@@ -593,7 +672,7 @@ def message_item_text(item) -> str:
     return "".join(parts)
 
 
-def responses_sse_to_chat(resp, fallback_usage=None):
+def responses_sse_to_chat(resp, fallback_usage=None, plan_lock_name=""):
     resp_id = "chatcmpl-cursor-compat"
     model = None
     event = ""
@@ -602,6 +681,8 @@ def responses_sse_to_chat(resp, fallback_usage=None):
     last_output_kind = None  # "tool" if the latest assistant output is a function_call; "text" for final prose.
     tool_indices = {}
     tool_arg_streamed = {}
+    tool_names_by_key = {}
+    tool_arg_full = {}
     next_tool_index = 0
     completed = False
     text_buf = []
@@ -703,13 +784,15 @@ def responses_sse_to_chat(resp, fallback_usage=None):
             if delta:
                 last_output_kind = "text"
                 text_buf.append(str(delta))
-                yield sse_event(None, chat_chunk(resp_id, model, {"content": str(delta)}))
+                for piece in _iter_char_chunks(str(delta)):
+                    yield sse_event(None, chat_chunk(resp_id, model, {"content": piece}))
         elif typ == "response.output_text.done":
             last_output_kind = "text"
             txt = obj.get("text") or obj.get("delta") or ""
             if txt and not text_buf:
                 text_buf.append(str(txt))
-                yield sse_event(None, chat_chunk(resp_id, model, {"content": str(txt)}))
+                for piece in _iter_char_chunks(str(txt)):
+                    yield sse_event(None, chat_chunk(resp_id, model, {"content": piece}))
         elif typ == "response.output_item.added":
             item = obj.get("item") or {}
             if isinstance(item, dict) and item.get("type") == "message":
@@ -719,6 +802,7 @@ def responses_sse_to_chat(resp, fallback_usage=None):
                 last_output_kind = "tool"
                 call_id = normalize_call_id(item.get("call_id") or item.get("id"), str(item.get("name")) + str(obj.get("output_index")))
                 key = str(obj.get("output_index", call_id))
+                tool_names_by_key[key] = str(item.get("name") or "tool")
                 idx = tool_indices.setdefault(key, next_tool_index)
                 if idx == next_tool_index:
                     next_tool_index += 1
@@ -734,7 +818,14 @@ def responses_sse_to_chat(resp, fallback_usage=None):
             delta = obj.get("delta") or ""
             if delta:
                 tool_arg_streamed[key] = True
-            yield sse_event(None, chat_chunk(resp_id, model, {"tool_calls": [{"index": idx, "function": {"arguments": str(delta)}}]}))
+                prev_full = tool_arg_full.get(key, "")
+                merged = prev_full + str(delta)
+                tool_name = tool_names_by_key.get(key, "")
+                merged = _fix_createplan_arguments_text(merged, tool_name, plan_lock_name)
+                tool_arg_full[key] = merged
+                emit = merged[len(prev_full):]
+                for piece in _iter_char_chunks(emit):
+                    yield sse_event(None, chat_chunk(resp_id, model, {"tool_calls": [{"index": idx, "function": {"arguments": piece}}]}))
         elif typ == "response.output_item.done":
             item = obj.get("item") or {}
             if isinstance(item, dict) and item.get("type") == "message":
@@ -742,11 +833,13 @@ def responses_sse_to_chat(resp, fallback_usage=None):
                 txt = message_item_text(item)
                 if txt and not text_buf:
                     text_buf.append(txt)
-                    yield sse_event(None, chat_chunk(resp_id, model, {"content": txt}))
+                    for piece in _iter_char_chunks(txt):
+                        yield sse_event(None, chat_chunk(resp_id, model, {"content": piece}))
             if isinstance(item, dict) and item.get("type") == "function_call":
                 saw_tool = True
                 last_output_kind = "tool"
                 key = str(obj.get("output_index", item.get("call_id", "0")))
+                tool_names_by_key[key] = str(item.get("name") or tool_names_by_key.get(key, "tool"))
                 idx = tool_indices.setdefault(key, next_tool_index)
                 if idx == next_tool_index:
                     next_tool_index += 1
@@ -754,7 +847,10 @@ def responses_sse_to_chat(resp, fallback_usage=None):
                 # Responses often sends arguments both as deltas and again on item.done.
                 # ChatCompletions SSE expects argument deltas only once; duplicating corrupts JSON args.
                 if isinstance(args, str) and args and not tool_arg_streamed.get(key):
-                    yield sse_event(None, chat_chunk(resp_id, model, {"tool_calls": [{"index": idx, "function": {"arguments": args}}]}))
+                    tool_name = tool_names_by_key.get(key, str(item.get("name") or "tool"))
+                    args = _fix_createplan_arguments_text(args, tool_name, plan_lock_name)
+                    for piece in _iter_char_chunks(args):
+                        yield sse_event(None, chat_chunk(resp_id, model, {"tool_calls": [{"index": idx, "function": {"arguments": piece}}]}))
         elif typ == "response.completed":
             completed = True
             finish = "tool_calls" if last_output_kind == "tool" else "stop"
@@ -992,6 +1088,7 @@ class Handler(BaseHTTPRequestHandler):
         mode = "direct-subapi"
         response_mode = "passthrough"
         fallback_usage = None
+        plan_lock_name = ""
         request_raw_len = 0
         request_model = ""
         request_reasoning = ""
@@ -1017,7 +1114,7 @@ class Handler(BaseHTTPRequestHandler):
                         capture_cursor_body(obj, raw, upath)
                         fallback_usage = estimate_chat_prompt_usage(obj, len(raw))
                     if isinstance(obj, dict) and isinstance(obj.get("tools"), list) and obj.get("tools"):
-                        body, changed, robj = build_response_request_from_chat(raw)
+                        body, changed, robj, plan_lock_name = build_response_request_from_chat(raw)
                         upath = upath.rsplit("/chat/completions", 1)[0] + "/responses"
                         mode = "chat-via-responses"
                         response_mode = "responses-to-chat"
@@ -1026,7 +1123,9 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(rr, dict):
                             request_reasoning = str(rr.get("effort") or request_reasoning)
                         self.log_message("req-audit %s", audit_request(robj, mode))
-                        self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s stream=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, bool(robj.get("stream")))
+                        if plan_lock_name:
+                            self.log_message("plan-lock name=%s", plan_lock_name[:120])
+                        self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s stream=%s plan_lock=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, bool(robj.get("stream")), bool(plan_lock_name))
                     else:
                         body, changed = normalize_chat_body(raw)
                         obj2 = json.loads((body or raw).decode("utf-8"))
@@ -1075,7 +1174,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.end_headers()
                         headers_sent = True
 
-                    for c in responses_sse_to_chat(resp, fallback_usage=fallback_usage):
+                    for c in responses_sse_to_chat(resp, fallback_usage=fallback_usage, plan_lock_name=plan_lock_name):
                         chunk_count += 1
                         if first_chunk_ms is None:
                             first_chunk_ms = int((time.monotonic() - req_start) * 1000)
@@ -1150,7 +1249,7 @@ class Handler(BaseHTTPRequestHandler):
                                 buf = bytearray(); pending = []; headers_sent = False
                                 saw_tool = False; saw_text = False; finish_seen = None; tool_names = []
                                 chunk_count = 0; usage_out = False; usage_fallback_out = False
-                                for c in responses_sse_to_chat(retry_resp, fallback_usage=fallback_usage):
+                                for c in responses_sse_to_chat(retry_resp, fallback_usage=fallback_usage, plan_lock_name=plan_lock_name):
                                     chunk_count += 1
                                     if first_chunk_ms is None:
                                         first_chunk_ms = int((time.monotonic() - req_start) * 1000)
