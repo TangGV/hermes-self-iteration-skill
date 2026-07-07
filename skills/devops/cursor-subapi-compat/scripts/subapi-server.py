@@ -11,6 +11,7 @@ and Responses SSE tool events are translated back into ChatCompletions SSE
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import socket
@@ -23,6 +24,7 @@ from urllib.request import Request, urlopen
 
 UPSTREAM = "http://127.0.0.1:3000"
 LISTEN = ("127.0.0.1", 8327)
+REQ_COUNTER = itertools.count(1)
 DEBUG_SSE_SUMMARY = os.getenv("CURSOR_COMPAT_DEBUG_SSE", os.getenv("CURSOR_CPA_DEBUG_SSE", "")).lower() in {"1", "true", "yes", "on"}
 # Off by default: OpenAI final usage chunks make Cursor usage increment, but can
 # also overwrite Cursor's internal Context Usage panel. Enable only for tests.
@@ -857,6 +859,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def proxy(self, method: str):
         req_start = time.monotonic()
+        req_id = "%x-%d" % (int(time.time() * 1000), next(REQ_COUNTER))
+        client_ip = (self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP") or (self.client_address[0] if self.client_address else "")).split(",")[0].strip()
         upath = self.upstream_path()
         body = None
         changed = False
@@ -867,6 +871,7 @@ class Handler(BaseHTTPRequestHandler):
         request_model = ""
         request_reasoning = ""
         request_tools_count = 0
+        self.log_message("active-audit event=start req_id=%s client=%s method=%s path=%s upath=%s", req_id, client_ip, method, self.path, upath)
         if method in {"POST", "PUT", "PATCH"}:
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n) if n else b""
@@ -896,11 +901,13 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(rr, dict):
                             request_reasoning = str(rr.get("effort") or request_reasoning)
                         self.log_message("req-audit %s", audit_request(robj, mode))
+                        self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s stream=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, bool(robj.get("stream")))
                     else:
                         body, changed = normalize_chat_body(raw)
                         obj2 = json.loads((body or raw).decode("utf-8"))
                         if isinstance(obj2, dict):
                             self.log_message("req-audit %s", audit_request(obj2, "chat-native"))
+                            self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s stream=%s", req_id, client_ip, "chat-native", self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, bool(obj2.get("stream")))
                 except Exception as e:
                     self.log_message("transform failed: %r", e)
                     body, changed = normalize_chat_body(raw)
@@ -908,6 +915,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with urlopen(req, timeout=3600) as resp:
                 upstream_open_ms = int((time.monotonic() - req_start) * 1000)
+                upstream_request_id = resp.headers.get("X-Oneapi-Request-Id") or resp.headers.get("X-Request-Id") or resp.headers.get("Request-Id") or ""
+                self.log_message("flow-audit event=upstream_open req_id=%s upstream_status=%s upstream_request_id=%s upstream_open_ms=%s", req_id, getattr(resp, "status", ""), upstream_request_id, upstream_open_ms)
                 if response_mode == "responses-to-chat" and (body and b'"stream":true' in body.lower()):
                     # Do not send Cursor a normal 200/stop stream until we have seen
                     # meaningful model output (text or tool_calls).  The xAI/NewAPI failure
@@ -1004,11 +1013,15 @@ class Handler(BaseHTTPRequestHandler):
                     retried_empty_upstream = False
                     if empty_upstream_completion:
                         retried_empty_upstream = True
-                        self.log_message("empty-upstream retrying once with salted prompt_cache_key chunks=%s bytes=%s finish_seen=%s", chunk_count, len(buf), finish_seen)
+                        self.log_message("empty-upstream retrying once req_id=%s with salted prompt_cache_key chunks=%s bytes=%s finish_seen=%s", req_id, chunk_count, len(buf), finish_seen)
                         retry_body = salted_retry_body(body, "empty") if body is not None else body
                         retry_req = Request(UPSTREAM + upath, data=retry_body, headers=self.make_headers(len(retry_body) if retry_body is not None else None), method=method)
                         try:
                             with urlopen(retry_req, timeout=3600) as retry_resp:
+                                retry_upstream_request_id = retry_resp.headers.get("X-Oneapi-Request-Id") or retry_resp.headers.get("X-Request-Id") or retry_resp.headers.get("Request-Id") or ""
+                                if retry_upstream_request_id:
+                                    upstream_request_id = retry_upstream_request_id
+                                self.log_message("flow-audit event=retry_upstream_open req_id=%s upstream_status=%s upstream_request_id=%s", req_id, getattr(retry_resp, "status", ""), retry_upstream_request_id)
                                 buf = bytearray(); pending = []; headers_sent = False
                                 saw_tool = False; saw_text = False; finish_seen = None; tool_names = []
                                 chunk_count = 0; usage_out = False; usage_fallback_out = False
@@ -1073,10 +1086,17 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(sse_event(None, "[DONE]")); self.wfile.flush()
                     elapsed_ms = int((time.monotonic() - req_start) * 1000)
                     status_kind = "empty_upstream" if empty_upstream_completion else ("write_broken" if write_broken else "ok")
-                    self.log_message("resp-audit mode=%s raw_len=%s model=%s reasoning=%s tools=%s has_tool_calls=%s saw_text=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s empty_upstream=%s retried_empty=%s write_broken=%s write_broken_after_finish=%s upstream_open_ms=%s first_chunk_ms=%s first_output_ms=%s elapsed_ms=%s status=%s", mode, request_raw_len, request_model, request_reasoning, request_tools_count, saw_tool, saw_text, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out, empty_upstream_completion, retried_empty_upstream, write_broken, write_broken_after_finish, upstream_open_ms, first_chunk_ms, first_output_ms, elapsed_ms, status_kind)
+                    self.log_message("resp-audit req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s upstream_status=%s upstream_request_id=%s has_tool_calls=%s saw_text=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s empty_upstream=%s retried_empty=%s write_broken=%s write_broken_after_finish=%s upstream_open_ms=%s first_chunk_ms=%s first_output_ms=%s elapsed_ms=%s status=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, getattr(resp, "status", ""), upstream_request_id, saw_tool, saw_text, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out, empty_upstream_completion, retried_empty_upstream, write_broken, write_broken_after_finish, upstream_open_ms, first_chunk_ms, first_output_ms, elapsed_ms, status_kind)
+                    self.log_message("active-audit event=end req_id=%s elapsed_ms=%s status=%s", req_id, elapsed_ms, status_kind)
                     if elapsed_ms >= CURSOR_SLOW_AUDIT_MS:
                         slow = {
+                            "req_id": req_id,
+                            "client": client_ip,
+                            "path": self.path,
+                            "upath": upath,
                             "mode": mode,
+                            "upstream_status": getattr(resp, "status", ""),
+                            "upstream_request_id": upstream_request_id,
                             "raw_len": request_raw_len,
                             "model": request_model,
                             "reasoning": request_reasoning,
@@ -1112,9 +1132,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(payload)
                     elapsed_ms = int((time.monotonic() - req_start) * 1000)
                     if elapsed_ms >= CURSOR_SLOW_AUDIT_MS:
-                        self.log_message("slow-audit %s", json.dumps({"mode": mode, "raw_len": request_raw_len, "model": request_model, "reasoning": request_reasoning, "tools": request_tools_count, "elapsed_ms": elapsed_ms, "status": "passthrough", "upstream_open_ms": upstream_open_ms}, ensure_ascii=False, separators=(",", ":")))
+                        self.log_message("slow-audit %s", json.dumps({"req_id": req_id, "client": client_ip, "path": self.path, "upath": upath, "mode": mode, "raw_len": request_raw_len, "model": request_model, "reasoning": request_reasoning, "tools": request_tools_count, "elapsed_ms": elapsed_ms, "status": "passthrough", "upstream_status": getattr(resp, "status", ""), "upstream_request_id": upstream_request_id, "upstream_open_ms": upstream_open_ms}, ensure_ascii=False, separators=(",", ":")))
+                        self.log_message("active-audit event=end req_id=%s elapsed_ms=%s status=passthrough", req_id, elapsed_ms)
         except HTTPError as e:
             payload = e.read()
+            elapsed_ms = int((time.monotonic() - req_start) * 1000)
+            upstream_request_id = e.headers.get("X-Oneapi-Request-Id") or e.headers.get("X-Request-Id") or e.headers.get("Request-Id") or ""
+            self.log_message("error-audit req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s upstream_status=%s upstream_request_id=%s elapsed_ms=%s bytes=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, e.code, upstream_request_id, elapsed_ms, len(payload))
+            self.log_message("active-audit event=end req_id=%s elapsed_ms=%s status=http_error_%s", req_id, elapsed_ms, e.code)
             self.send_response(e.code)
             for k, v in e.headers.items():
                 if k.lower() not in HOP:
@@ -1124,6 +1149,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
         except Exception as e:
+            elapsed_ms = int((time.monotonic() - req_start) * 1000)
+            self.log_message("exception-audit req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s elapsed_ms=%s error=%r", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, elapsed_ms, e)
+            self.log_message("active-audit event=end req_id=%s elapsed_ms=%s status=exception", req_id, elapsed_ms)
             payload = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
