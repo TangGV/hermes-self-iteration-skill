@@ -330,6 +330,21 @@ def build_response_request_from_chat(raw: bytes) -> tuple[bytes, bool, dict]:
     return json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, resp
 
 
+def salted_retry_body(body: bytes, reason: str = "empty") -> bytes:
+    """Keep model/reasoning unchanged; only change prompt_cache_key to avoid a poisoned empty upstream cache/affinity path on retry."""
+    try:
+        obj = json.loads(body.decode("utf-8"))
+    except Exception:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    base = obj.get("prompt_cache_key")
+    if not isinstance(base, str) or not base:
+        base = "cursor"
+    obj["prompt_cache_key"] = base + ":retry-" + reason + ":" + hashlib.sha256((base + str(time.time_ns())).encode("utf-8")).hexdigest()[:8]
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def sse_event(event, data):
     if event:
         return f"event: {event}\n".encode() + f"data: {data}\n\n".encode()
@@ -528,6 +543,13 @@ def responses_sse_to_chat(resp, fallback_usage=None):
         data = line[5:].strip()
         if data == "[DONE]":
             continue
+        # After we have already translated response.completed and sent ChatCompletions [DONE]
+        # to Cursor, keep draining the upstream New API stream until EOF instead of closing
+        # immediately. Closing right after response.completed makes New API record
+        # stream_status=client_gone/context canceled even though Cursor received a valid
+        # tool_calls/stop finish.
+        if completed:
+            continue
         try:
             obj = json.loads(data)
         except Exception:
@@ -615,7 +637,10 @@ def responses_sse_to_chat(resp, fallback_usage=None):
                 if usage_chunk:
                     yield sse_event(None, usage_chunk)
             yield sse_event(None, "[DONE]")
-            break
+            # Do not break here. Drain any trailing upstream SSE bytes until EOF so the
+            # New API container sees a clean upstream completion rather than a canceled
+            # downstream context. No more chunks are forwarded to Cursor after [DONE].
+            continue
     if not completed:
         finish = "tool_calls" if last_output_kind == "tool" else "stop"
         log_summary("stream_ended_without_response.completed", finish)
@@ -865,23 +890,40 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with urlopen(req, timeout=3600) as resp:
                 if response_mode == "responses-to-chat" and (body and b'"stream":true' in body.lower()):
-                    self.send_response(resp.status)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.add_bridge_headers(changed, mode)
-                    self.end_headers()
+                    # Do not send Cursor a normal 200/stop stream until we have seen
+                    # meaningful model output (text or tool_calls).  The xAI/NewAPI failure
+                    # mode for large Cursor contexts is a tiny Responses stream that only
+                    # contains completion/usage plumbing; older bridge code translated that
+                    # into a normal ChatCompletions stop with fallback usage, which leaves
+                    # Cursor stuck at 0% with no actionable error.  Keep the early chunks
+                    # pending; if the upstream finishes empty, return an explicit 502.
                     buf = bytearray(); cap = 256 * 1024
+                    pending = []
+                    headers_sent = False
                     saw_tool = False
+                    saw_text = False
                     finish_seen = None
                     tool_names = []
                     chunk_count = 0
                     usage_out = False
                     usage_fallback_out = False
+                    write_broken = False
+                    write_broken_after_finish = False
+
+                    def start_sse_response():
+                        nonlocal headers_sent
+                        if headers_sent:
+                            return
+                        self.send_response(resp.status)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.add_bridge_headers(changed, mode)
+                        self.end_headers()
+                        headers_sent = True
+
                     for c in responses_sse_to_chat(resp, fallback_usage=fallback_usage):
                         chunk_count += 1
                         if len(buf) < cap:
                             buf.extend(c[: cap - len(buf)])
-                        if b"tool_calls" in c:
-                            saw_tool = True
                         # Parse our outgoing ChatCompletions SSE chunks enough to know why Cursor continues.
                         try:
                             for part in c.split(b"data: ")[1:]:
@@ -898,17 +940,109 @@ class Handler(BaseHTTPRequestHandler):
                                     if fallback_usage and o.get("usage") == normalize_usage(fallback_usage):
                                         usage_fallback_out = True
                                 delta = choice.get("delta") or {}
+                                if delta.get("content"):
+                                    saw_text = True
                                 for tc in delta.get("tool_calls") or []:
+                                    saw_tool = True
                                     fn = (tc.get("function") or {}).get("name")
                                     if fn and fn not in tool_names and len(tool_names) < 12:
                                         tool_names.append(fn)
                         except Exception:
                             pass
+
+                        if not headers_sent and not (saw_text or saw_tool):
+                            pending.append(c)
+                            continue
                         try:
+                            start_sse_response()
+                            if pending:
+                                for pc in pending:
+                                    self.wfile.write(pc)
+                                pending.clear()
                             self.wfile.write(c); self.wfile.flush()
                         except (BrokenPipeError, ConnectionResetError, OSError):
+                            write_broken = True
+                            write_broken_after_finish = bool(finish_seen)
+                            try:
+                                resp.close()
+                            except Exception:
+                                pass
                             break
-                    self.log_message("resp-audit mode=%s has_tool_calls=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s", mode, saw_tool, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out)
+
+                    empty_upstream_completion = (
+                        not headers_sent
+                        and not write_broken
+                        and not saw_tool
+                        and not saw_text
+                        and finish_seen in {"stop", "tool_calls", None}
+                    )
+                    retried_empty_upstream = False
+                    if empty_upstream_completion:
+                        retried_empty_upstream = True
+                        self.log_message("empty-upstream retrying once with salted prompt_cache_key chunks=%s bytes=%s finish_seen=%s", chunk_count, len(buf), finish_seen)
+                        retry_body = salted_retry_body(body, "empty") if body is not None else body
+                        retry_req = Request(UPSTREAM + upath, data=retry_body, headers=self.make_headers(len(retry_body) if retry_body is not None else None), method=method)
+                        try:
+                            with urlopen(retry_req, timeout=3600) as retry_resp:
+                                buf = bytearray(); pending = []; headers_sent = False
+                                saw_tool = False; saw_text = False; finish_seen = None; tool_names = []
+                                chunk_count = 0; usage_out = False; usage_fallback_out = False
+                                for c in responses_sse_to_chat(retry_resp, fallback_usage=fallback_usage):
+                                    chunk_count += 1
+                                    if len(buf) < cap:
+                                        buf.extend(c[: cap - len(buf)])
+                                    try:
+                                        for part in c.split(b"data: ")[1:]:
+                                            line = part.split(b"\n", 1)[0].strip()
+                                            if not line or line == b"[DONE]" or not line.startswith(b"{"):
+                                                continue
+                                            o = json.loads(line.decode("utf-8", "replace"))
+                                            choice = (o.get("choices") or [{}])[0]
+                                            fr = choice.get("finish_reason")
+                                            if fr:
+                                                finish_seen = fr
+                                            if isinstance(o.get("usage"), dict):
+                                                usage_out = True
+                                                if fallback_usage and o.get("usage") == normalize_usage(fallback_usage):
+                                                    usage_fallback_out = True
+                                            delta = choice.get("delta") or {}
+                                            if delta.get("content"):
+                                                saw_text = True
+                                            for tc in delta.get("tool_calls") or []:
+                                                saw_tool = True
+                                                fn = (tc.get("function") or {}).get("name")
+                                                if fn and fn not in tool_names and len(tool_names) < 12:
+                                                    tool_names.append(fn)
+                                    except Exception:
+                                        pass
+                                    if not headers_sent and not (saw_text or saw_tool):
+                                        pending.append(c)
+                                        continue
+                                    start_sse_response()
+                                    if pending:
+                                        for pc in pending:
+                                            self.wfile.write(pc)
+                                        pending.clear()
+                                    self.wfile.write(c); self.wfile.flush()
+                                empty_upstream_completion = (not headers_sent and not saw_tool and not saw_text and finish_seen in {"stop", "tool_calls", None})
+                        except Exception as retry_e:
+                            self.log_message("empty-upstream retry failed: %r", retry_e)
+                    if empty_upstream_completion:
+                        # Cursor maps non-2xx custom-provider failures to the misleading
+                        # "User API Key Rate limit exceeded" banner.  After one real retry
+                        # has also produced an empty upstream completion, return a normal SSE
+                        # diagnostic instead of an HTTP error so the user sees the real cause.
+                        diagnostic = "上游本轮返回空响应，桥接层已自动重试并改为可识别的空响应事件；这不是 API Key 限流。后续请求会继续走同一会话，不需要换 Key/Base/模型。"
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.add_bridge_headers(changed, mode)
+                        self.send_header("X-Cursor-Upstream-Empty", "1")
+                        self.end_headers()
+                        self.wfile.write(sse_event(None, chat_chunk("chatcmpl-cursor-compat", None, {"role": "assistant"})))
+                        self.wfile.write(sse_event(None, chat_chunk("chatcmpl-cursor-compat", None, {"content": diagnostic})))
+                        self.wfile.write(sse_event(None, chat_chunk("chatcmpl-cursor-compat", None, {}, "stop")))
+                        self.wfile.write(sse_event(None, "[DONE]")); self.wfile.flush()
+                    self.log_message("resp-audit mode=%s has_tool_calls=%s saw_text=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s empty_upstream=%s retried_empty=%s write_broken=%s write_broken_after_finish=%s", mode, saw_tool, saw_text, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out, empty_upstream_completion, retried_empty_upstream, write_broken, write_broken_after_finish)
                 else:
                     payload = resp.read()
                     if response_mode == "responses-to-chat":
