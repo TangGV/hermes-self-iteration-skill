@@ -35,16 +35,43 @@ def test_no_lock_on_new_plan():
     obj = {"messages": messages}
     assert mod.resolve_plan_lock_name(obj) == ""
 
-def test_fix_createplan_rewrites_name():
+def test_multi_plan_history_locks_last_active():
+    import json
+    messages = []
+    for name in (
+        "workspace-tidy",
+        "workspace-tidy-v3",
+        "workspace-tidy-minimal-optimized",
+    ):
+        messages.append(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "CreatePlan",
+                            "arguments": json.dumps({"name": name, "plan": "# x"}),
+                        }
+                    }
+                ],
+            }
+        )
+    messages.append({"role": "user", "content": "更新计划当前的迭代简单点"})
+    obj = {"messages": messages}
+    assert mod.resolve_plan_lock_name(obj) == "workspace-tidy-minimal-optimized"
+
+
+def test_fix_createplan_rewrites_name() -> None:
+    import json
     raw = '{"name":"workspace-tidy-minimal","plan":"# x"}'
-    out = mod._fix_createplan_arguments_text(raw, "CreatePlan", "workspace-tidy-v3")
-    assert '"workspace-tidy-v3"' in out
-    assert "workspace-tidy-minimal" not in out
+    out = mod._fix_createplan_arguments_text(raw, "CreatePlan", "workspace-tidy-minimal-optimized")
+    assert json.loads(out)["name"] == "workspace-tidy-minimal-optimized"
 
 if __name__ == "__main__":
     test_update_intent_locks_first_slug()
     test_plan_md_path_anchor()
     test_explicit_slug_in_user()
     test_no_lock_on_new_plan()
+    test_multi_plan_history_locks_last_active()
     test_fix_createplan_rewrites_name()
     print("OK all plan lock tests")

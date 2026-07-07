@@ -421,11 +421,26 @@ def _user_wants_plan_update(text: str) -> bool:
     markers = (
         "更新计划", "优化当前计划", "简化当前计划", "继续优化", "压缩一版", "最短版",
         "修改原计划", "迭代简单", "简化当前", "优化当前", "当前计划", "优先当前计划",
-        "当前版本", "简化当前计划优先",
+        "当前版本", "简化当前计划优先", "优化计划", "优化计划继续", "继续优化计划",
+        "继续优化v", "计划中没见到",
         "update plan", "modify plan", "revise plan", "simplify", "iterate plan",
     )
     low = text.lower()
-    return any(m.lower() in low for m in markers)
+    if any(m.lower() in low for m in markers):
+        return True
+    if re.search(r"(优化|继续|简化|更新|调整).{0,12}计划|计划.{0,12}(优化|继续|简化|更新)", text):
+        return True
+    return False
+
+
+def _latest_user_turn_plan_mode(messages) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        return "Plan mode is active" in _message_text_for_plan_hint(msg)
+    return False
 
 
 def _extract_workspace_plan_slugs(messages) -> list[str]:
@@ -467,16 +482,35 @@ def _explicit_plan_slug_from_user(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _prefer_specific_workspace_slugs(slugs: list[str]) -> list[str]:
+    if not slugs:
+        return slugs
+    long = [s for s in slugs if s.lower() != "workspace-tidy"]
+    return long if long else slugs
+
+
 def _thread_plan_anchor(messages, user_text: str = "") -> str:
-    """Official Plan updates reuse the session's established args.name (first plan identity)."""
+    """Lock target for CreatePlan.args.name.
+
+    Official CLI keeps one name for the whole session. Cursor GUI + custom API often
+    accumulates many historical CreatePlan names in messages; updates must target the
+    **active** plan (last CreatePlan), not the first slug like bare `workspace-tidy`.
+    """
     explicit = _explicit_plan_slug_from_user(user_text)
     if explicit:
         return explicit
     names = _extract_plan_names_from_messages(messages)
     if names:
+        if _user_wants_plan_update(user_text) or len(names) > 1:
+            return names[-1]
         return names[0]
-    for src in (_extract_workspace_plan_slugs(messages), _extract_plan_slugs_from_plan_md_paths(messages)):
+    for src in (
+        _prefer_specific_workspace_slugs(_extract_workspace_plan_slugs(messages)),
+        _extract_plan_slugs_from_plan_md_paths(messages),
+    ):
         if src:
+            if _user_wants_plan_update(user_text) or len(src) > 1:
+                return src[-1]
             return src[0]
     return ""
 
@@ -494,6 +528,8 @@ def resolve_plan_lock_name(obj: dict) -> str:
     if _user_wants_plan_update(user_text):
         return anchor
     if _conversation_has_createplan_history(messages):
+        if _latest_user_turn_plan_mode(messages):
+            return anchor
         return anchor
     return ""
 
