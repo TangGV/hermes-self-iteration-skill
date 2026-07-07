@@ -376,6 +376,12 @@ def _fix_createplan_arguments_text(arg_text: str, tool_name: str, plan_lock_name
 
 
 def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
+    """Match official Cursor plan --continue: reuse args.name when chat already has CreatePlan.
+
+    Official does NOT keyword-match user text on a bridge. It keeps plan state in the
+    client/session and sends the model full prior turns (including createPlan tool calls).
+    We only nudge when that history is visible in the incoming messages.
+    """
     if not plan_name or not isinstance(obj, dict):
         return False
     tools = obj.get("tools")
@@ -391,20 +397,9 @@ def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
     if not has_plan_tool:
         return False
     messages = obj.get("messages")
-    text = _latest_user_text(messages)
-    if _user_wants_new_plan(text):
+    if _user_wants_new_plan(_latest_user_text(messages)):
         return False
-    # Official Cursor plan --continue updates reuse args.name even without explicit "do not create".
-    if _conversation_has_createplan_history(messages):
-        return True
-    markers = (
-        "修改", "更新", "优化", "完善", "改进", "润色", "补充", "细化", "调整", "迭代",
-        "原计划", "已有计划", "继续", "在此基础上",
-        "不要新建", "别新建", "不要重新创建", "same plan", "existing plan",
-        "original plan", "update the plan", "modify the plan", "revise the plan",
-        "optimize the plan", "refine the plan", "improve the plan",
-    )
-    return any(m.lower() in text.lower() for m in markers)
+    return _conversation_has_createplan_history(messages)
 
 
 def make_plan_update_nudge(plan_name: str):
