@@ -348,12 +348,21 @@ def _latest_user_text(messages) -> str:
 def _user_wants_new_plan(text: str) -> bool:
     if not text:
         return False
+    if _user_wants_plan_update(text):
+        return False
+    low = text.lower()
+    if "更新计划" in text or "update plan" in low:
+        return False
     markers = (
-        "新建计划", "新计划", "另一个计划", "重新制定", "重新创建", "从零", "另起",
+        "新建计划", "另一个计划", "重新制定", "重新创建", "从零", "另起",
         "new plan", "another plan", "from scratch", "start over",
     )
-    low = text.lower()
-    return any(m.lower() in low for m in markers)
+    if any(m.lower() in low for m in markers):
+        return True
+    # Avoid matching 新计划 inside 更新计划
+    if "新计划" in text and "更新计划" not in text:
+        return True
+    return False
 
 
 def _conversation_has_createplan_history(messages) -> bool:
