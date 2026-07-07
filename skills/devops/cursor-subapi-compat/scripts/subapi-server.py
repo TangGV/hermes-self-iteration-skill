@@ -269,6 +269,28 @@ def _is_plan_function_name(name: str) -> bool:
     return n in {"createplan", "updateplan"} or ("plan" in n and "create" in n)
 
 
+# Cursor built-in tool names that must never be treated as CreatePlan args.name.
+_CURSOR_BUILTIN_TOOL_NAMES = {
+    "shell", "read", "write", "grep", "glob", "list", "delete", "search",
+    "websearch", "browser", "provider-switcher", "channel-switcher", "updateplan",
+}
+
+
+def _looks_like_plan_display_name(name: str) -> bool:
+    n = (name or "").strip()
+    if not n or len(n) < 3:
+        return False
+    low = n.lower().replace("_", "").replace("-", "")
+    if low in _CURSOR_BUILTIN_TOOL_NAMES:
+        return False
+    # Real plan names are usually titles/sentences, not single PascalCase tool ids.
+    if n in {"Shell", "Read", "Write", "Grep", "Glob", "Delete"}:
+        return False
+    if " " in n or "：" in n or ":" in n or len(n) >= 12:
+        return True
+    return low not in _CURSOR_BUILTIN_TOOL_NAMES
+
+
 def _extract_plan_names_from_messages(messages) -> list[str]:
     names = []
     if not isinstance(messages, list):
@@ -284,22 +306,27 @@ def _extract_plan_names_from_messages(messages) -> list[str]:
                 continue
             args = _safe_json_obj(fn.get("arguments")) or {}
             name = args.get("name")
-            if isinstance(name, str) and name.strip():
+            if isinstance(name, str) and _looks_like_plan_display_name(name):
                 names.append(name.strip())
         if msg.get("role") == "tool":
+            # msg["name"] is the tool id (Shell/Read/...), NOT CreatePlan args.name.
+            if not _is_plan_function_name(str(msg.get("name") or "")):
+                continue
             args = _safe_json_obj(msg.get("content"))
             if isinstance(args, dict):
-                name = args.get("name") or args.get("planName") or args.get("title")
-                if isinstance(name, str) and name.strip():
+                name = args.get("name") or args.get("planName")
+                if isinstance(name, str) and _looks_like_plan_display_name(name):
                     names.append(name.strip())
-        # Some Cursor/agent traces embed tool calls/results as JSON-ish text.
         txt = _message_text_for_plan_hint(msg)
-        if "createPlan" in txt or "CreatePlan" in txt or "createPlanToolCall" in txt:
-            for m in re.finditer(r'"name"\s*:\s*"([^"\n]{1,160})"', txt):
+        if "createPlanToolCall" in txt or '"createPlanToolCall"' in txt:
+            for m in re.finditer(
+                r'createPlanToolCall"\s*:\s*\{[^}]*"args"\s*:\s*\{[^}]*"name"\s*:\s*"([^"\n]{1,200})"',
+                txt,
+                flags=re.DOTALL,
+            ):
                 val = m.group(1).strip()
-                if val and val not in names:
+                if _looks_like_plan_display_name(val) and val not in names:
                     names.append(val)
-    # Preserve order, but return most recent last.
     dedup = []
     for n in names:
         if n not in dedup:
@@ -339,8 +366,10 @@ def _conversation_has_createplan_history(messages) -> bool:
             fn = tc.get("function") or {}
             if _is_plan_function_name(str(fn.get("name") or "")):
                 return True
+        if msg.get("role") == "tool" and _is_plan_function_name(str(msg.get("name") or "")):
+            return True
         txt = _message_text_for_plan_hint(msg)
-        if "createPlan" in txt or "CreatePlan" in txt or "createPlanToolCall" in txt:
+        if "createPlanToolCall" in txt:
             return True
     return False
 
