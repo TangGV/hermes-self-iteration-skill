@@ -33,6 +33,7 @@ CURSOR_EMIT_USAGE_PREROLL = os.getenv("CURSOR_EMIT_USAGE_PREROLL", "0").lower() 
 CURSOR_FULL_CAPTURE = os.getenv("CURSOR_FULL_CAPTURE", "0").lower() in {"1", "true", "yes", "on"}
 CURSOR_CAPTURE_DIR = Path(os.getenv("CURSOR_CAPTURE_DIR", "/var/log/cursor-full-capture"))
 CURSOR_CAPTURE_MAX_BYTES = int(os.getenv("CURSOR_CAPTURE_MAX_BYTES", "2097152"))
+CURSOR_SLOW_AUDIT_MS = int(os.getenv("CURSOR_SLOW_AUDIT_MS", "15000"))
 
 HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -855,20 +856,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
 
     def proxy(self, method: str):
+        req_start = time.monotonic()
         upath = self.upstream_path()
         body = None
         changed = False
         mode = "direct-subapi"
         response_mode = "passthrough"
         fallback_usage = None
+        request_raw_len = 0
+        request_model = ""
+        request_reasoning = ""
+        request_tools_count = 0
         if method in {"POST", "PUT", "PATCH"}:
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n) if n else b""
+            request_raw_len = len(raw)
             body = raw
             if raw and upath.endswith("/chat/completions"):
                 try:
                     obj = json.loads(raw.decode("utf-8"))
                     if isinstance(obj, dict):
+                        request_model = str(obj.get("model") or "")
+                        request_tools_count = len(obj.get("tools") or []) if isinstance(obj.get("tools"), list) else 0
+                        r0 = obj.get("reasoning")
+                        if isinstance(r0, dict):
+                            request_reasoning = str(r0.get("effort") or "")
+                        else:
+                            request_reasoning = str(obj.get("reasoning_effort") or r0 or "")
                         self.log_message("cursor-shape %s", audit_cursor_shape(obj, len(raw), upath))
                         capture_cursor_body(obj, raw, upath)
                         fallback_usage = estimate_chat_prompt_usage(obj, len(raw))
@@ -877,6 +891,10 @@ class Handler(BaseHTTPRequestHandler):
                         upath = upath.rsplit("/chat/completions", 1)[0] + "/responses"
                         mode = "chat-via-responses"
                         response_mode = "responses-to-chat"
+                        request_model = str(robj.get("model") or request_model)
+                        rr = robj.get("reasoning") if isinstance(robj, dict) else None
+                        if isinstance(rr, dict):
+                            request_reasoning = str(rr.get("effort") or request_reasoning)
                         self.log_message("req-audit %s", audit_request(robj, mode))
                     else:
                         body, changed = normalize_chat_body(raw)
@@ -889,6 +907,7 @@ class Handler(BaseHTTPRequestHandler):
         req = Request(UPSTREAM + upath, data=body, headers=self.make_headers(len(body) if body is not None else None), method=method)
         try:
             with urlopen(req, timeout=3600) as resp:
+                upstream_open_ms = int((time.monotonic() - req_start) * 1000)
                 if response_mode == "responses-to-chat" and (body and b'"stream":true' in body.lower()):
                     # Do not send Cursor a normal 200/stop stream until we have seen
                     # meaningful model output (text or tool_calls).  The xAI/NewAPI failure
@@ -909,6 +928,8 @@ class Handler(BaseHTTPRequestHandler):
                     usage_fallback_out = False
                     write_broken = False
                     write_broken_after_finish = False
+                    first_chunk_ms = None
+                    first_output_ms = None
 
                     def start_sse_response():
                         nonlocal headers_sent
@@ -922,6 +943,8 @@ class Handler(BaseHTTPRequestHandler):
 
                     for c in responses_sse_to_chat(resp, fallback_usage=fallback_usage):
                         chunk_count += 1
+                        if first_chunk_ms is None:
+                            first_chunk_ms = int((time.monotonic() - req_start) * 1000)
                         if len(buf) < cap:
                             buf.extend(c[: cap - len(buf)])
                         # Parse our outgoing ChatCompletions SSE chunks enough to know why Cursor continues.
@@ -950,6 +973,8 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
 
+                        if first_output_ms is None and (saw_text or saw_tool):
+                            first_output_ms = int((time.monotonic() - req_start) * 1000)
                         if not headers_sent and not (saw_text or saw_tool):
                             pending.append(c)
                             continue
@@ -989,6 +1014,8 @@ class Handler(BaseHTTPRequestHandler):
                                 chunk_count = 0; usage_out = False; usage_fallback_out = False
                                 for c in responses_sse_to_chat(retry_resp, fallback_usage=fallback_usage):
                                     chunk_count += 1
+                                    if first_chunk_ms is None:
+                                        first_chunk_ms = int((time.monotonic() - req_start) * 1000)
                                     if len(buf) < cap:
                                         buf.extend(c[: cap - len(buf)])
                                     try:
@@ -1015,6 +1042,8 @@ class Handler(BaseHTTPRequestHandler):
                                                     tool_names.append(fn)
                                     except Exception:
                                         pass
+                                    if first_output_ms is None and (saw_text or saw_tool):
+                                        first_output_ms = int((time.monotonic() - req_start) * 1000)
                                     if not headers_sent and not (saw_text or saw_tool):
                                         pending.append(c)
                                         continue
@@ -1042,7 +1071,33 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(sse_event(None, chat_chunk("chatcmpl-cursor-compat", None, {"content": diagnostic})))
                         self.wfile.write(sse_event(None, chat_chunk("chatcmpl-cursor-compat", None, {}, "stop")))
                         self.wfile.write(sse_event(None, "[DONE]")); self.wfile.flush()
-                    self.log_message("resp-audit mode=%s has_tool_calls=%s saw_text=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s empty_upstream=%s retried_empty=%s write_broken=%s write_broken_after_finish=%s", mode, saw_tool, saw_text, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out, empty_upstream_completion, retried_empty_upstream, write_broken, write_broken_after_finish)
+                    elapsed_ms = int((time.monotonic() - req_start) * 1000)
+                    status_kind = "empty_upstream" if empty_upstream_completion else ("write_broken" if write_broken else "ok")
+                    self.log_message("resp-audit mode=%s raw_len=%s model=%s reasoning=%s tools=%s has_tool_calls=%s saw_text=%s finish_seen=%s tool_names=%s chunks=%s bytes=%s usage_seen=%s usage_out=%s usage_fallback=%s empty_upstream=%s retried_empty=%s write_broken=%s write_broken_after_finish=%s upstream_open_ms=%s first_chunk_ms=%s first_output_ms=%s elapsed_ms=%s status=%s", mode, request_raw_len, request_model, request_reasoning, request_tools_count, saw_tool, saw_text, finish_seen, ",".join(tool_names), chunk_count, len(buf), b'"usage"' in buf, usage_out, usage_fallback_out, empty_upstream_completion, retried_empty_upstream, write_broken, write_broken_after_finish, upstream_open_ms, first_chunk_ms, first_output_ms, elapsed_ms, status_kind)
+                    if elapsed_ms >= CURSOR_SLOW_AUDIT_MS:
+                        slow = {
+                            "mode": mode,
+                            "raw_len": request_raw_len,
+                            "model": request_model,
+                            "reasoning": request_reasoning,
+                            "tools": request_tools_count,
+                            "tool_names": tool_names,
+                            "finish_seen": finish_seen,
+                            "has_tool_calls": saw_tool,
+                            "saw_text": saw_text,
+                            "chunks": chunk_count,
+                            "bytes": len(buf),
+                            "upstream_open_ms": upstream_open_ms,
+                            "first_chunk_ms": first_chunk_ms,
+                            "first_output_ms": first_output_ms,
+                            "elapsed_ms": elapsed_ms,
+                            "empty_upstream": empty_upstream_completion,
+                            "retried_empty": retried_empty_upstream,
+                            "write_broken": write_broken,
+                            "write_broken_after_finish": write_broken_after_finish,
+                            "status": status_kind,
+                        }
+                        self.log_message("slow-audit %s", json.dumps(slow, ensure_ascii=False, separators=(",", ":")))
                 else:
                     payload = resp.read()
                     if response_mode == "responses-to-chat":
@@ -1055,6 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", str(len(payload)))
                     self.end_headers()
                     self.wfile.write(payload)
+                    elapsed_ms = int((time.monotonic() - req_start) * 1000)
+                    if elapsed_ms >= CURSOR_SLOW_AUDIT_MS:
+                        self.log_message("slow-audit %s", json.dumps({"mode": mode, "raw_len": request_raw_len, "model": request_model, "reasoning": request_reasoning, "tools": request_tools_count, "elapsed_ms": elapsed_ms, "status": "passthrough", "upstream_open_ms": upstream_open_ms}, ensure_ascii=False, separators=(",", ":")))
         except HTTPError as e:
             payload = e.read()
             self.send_response(e.code)
