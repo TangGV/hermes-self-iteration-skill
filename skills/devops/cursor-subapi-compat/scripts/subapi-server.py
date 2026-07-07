@@ -14,6 +14,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -234,6 +235,119 @@ def make_actionable_nudge():
     }
 
 
+def _safe_json_obj(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            obj = json.loads(value)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _message_text_for_plan_hint(msg) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+        return "\n".join(x for x in parts if x)
+    return ""
+
+
+def _is_plan_function_name(name: str) -> bool:
+    n = (name or "").lower().replace("_", "").replace("-", "")
+    return n in {"createplan", "updateplan"} or ("plan" in n and "create" in n)
+
+
+def _extract_plan_names_from_messages(messages) -> list[str]:
+    names = []
+    if not isinstance(messages, list):
+        return names
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            if not _is_plan_function_name(str(fn.get("name") or "")):
+                continue
+            args = _safe_json_obj(fn.get("arguments")) or {}
+            name = args.get("name")
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+        # Some Cursor/agent traces embed tool calls/results as JSON-ish text.
+        txt = _message_text_for_plan_hint(msg)
+        if "createPlan" in txt or "CreatePlan" in txt or "createPlanToolCall" in txt:
+            for m in re.finditer(r'"name"\s*:\s*"([^"\n]{1,160})"', txt):
+                val = m.group(1).strip()
+                if val and val not in names:
+                    names.append(val)
+    # Preserve order, but return most recent last.
+    dedup = []
+    for n in names:
+        if n not in dedup:
+            dedup.append(n)
+    return dedup
+
+
+def _latest_user_text(messages) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return _message_text_for_plan_hint(msg)
+    return ""
+
+
+def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
+    if not plan_name or not isinstance(obj, dict):
+        return False
+    tools = obj.get("tools")
+    has_plan_tool = False
+    if isinstance(tools, list):
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function") if isinstance(t.get("function"), dict) else t
+            if _is_plan_function_name(str((fn or {}).get("name") or "")):
+                has_plan_tool = True
+                break
+    if not has_plan_tool:
+        return False
+    text = _latest_user_text(obj.get("messages"))
+    markers = (
+        "修改", "更新", "改一下", "调整", "迭代", "原计划", "已有计划",
+        "不要新建", "别新建", "不要重新创建", "same plan", "existing plan",
+        "original plan", "update the plan", "modify the plan", "revise the plan",
+    )
+    return any(m.lower() in text.lower() for m in markers)
+
+
+def make_plan_update_nudge(plan_name: str):
+    safe_name = str(plan_name).replace("\n", " ")[:180]
+    return {
+        "role": "system",
+        "content": (
+            "Cursor Plan compatibility instruction: this conversation already has an existing plan named "
+            f"{safe_name!r}. If the user asks to modify/update/revise/iterate the existing or original plan, "
+            "call the plan creation tool with exactly the same args.name value above and the full updated plan content. "
+            "Do not invent a new plan name, do not append suffixes to args.name, and do not create a second plan. "
+            "Only the plan title/body may change."
+        ),
+    }
+
+
 def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
     out = dict(obj)
     changed = False
@@ -259,10 +373,19 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
                 has_tool_result = True
                 break
     force_initial_tool = actionable and not has_tool_result
+    plan_names = _extract_plan_names_from_messages(messages)
+    plan_update_name = plan_names[-1] if plan_names else ""
+    add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
     if force_initial_tool and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Agent compatibility instruction" in m.get("content", "") for m in messages)
         if not already:
             messages = [make_actionable_nudge()] + messages
+            changed = True
+    if add_plan_nudge and isinstance(messages, list):
+        already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Plan compatibility instruction" in m.get("content", "") for m in messages)
+        if not already:
+            messages = [make_plan_update_nudge(plan_update_name)] + messages
+            out["_cursor_plan_update_name"] = plan_update_name
             changed = True
     resp = {}
     for k in ("model", "stream", "temperature", "top_p", "reasoning", "reasoning_effort", "service_tier", "user", "prompt_cache_key"):
@@ -286,6 +409,8 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
     tools = chat_tools_to_responses_tools(out.get("tools"))
     if tools:
         resp["tools"] = tools
+        if out.get("_cursor_plan_update_name"):
+            resp.setdefault("metadata", {})["cursor_plan_update_name"] = out.get("_cursor_plan_update_name")
         if force_initial_tool:
             resp["tool_choice"] = "required"
         elif out.get("tool_choice") not in (None, {}, "none"):

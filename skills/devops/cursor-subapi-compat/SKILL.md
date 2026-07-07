@@ -220,4 +220,5 @@ ssh root@62.106.70.67 "systemctl restart cursor-cpa-compat subapi-cursor-compat 
 - `references/cursor-pitfalls.md` — 排障速查
 - `references/cursor-composer-custom-api-keys.md` — **Composer vs custom key**、Request ID 未到 VPS、`gpt-5.4` → `grok-composer-2.5-fast` 别名
 - `references/composer25-cli-full-flow-test-plan.md` — 本机 Cursor Agent CLI + Composer 2.5 全流程测试计划：smoke、读写、修代码/pytest、大上下文、stream-json 模型确认、VPS `/cursor/v1` 监测对照与报告模板
+- `references/cursor-plan-mode-createplan-update.md` — Cursor Plan 模式官方 Composer 2.5 对比：创建和修改计划都用 `CreatePlan`；更新原计划的关键是复用相同 `args.name`，SubAPI 桥接层通过历史计划名 nudge 防止模型新建计划名
 - `cliproxyapi-cpa-ops` → `references/cpa-windows-local-client-proxy.md`、`references/cpa-client-api-key-rate-limit.md` — 本机代理与 CPA 限流文案"
