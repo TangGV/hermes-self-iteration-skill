@@ -283,6 +283,8 @@ def _looks_like_plan_display_name(name: str) -> bool:
     low = n.lower().replace("_", "").replace("-", "")
     if low in _CURSOR_BUILTIN_TOOL_NAMES:
         return False
+    if n.lower().startswith("workspace-tidy"):
+        return True
     # Real plan names are usually titles/sentences, not single PascalCase tool ids.
     if n in {"Shell", "Read", "Write", "Grep", "Glob", "Delete"}:
         return False
@@ -404,31 +406,70 @@ def _fix_createplan_arguments_text(arg_text: str, tool_name: str, plan_lock_name
     )
 
 
-def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
-    """Match official Cursor plan --continue: reuse args.name when chat already has CreatePlan.
-
-    Official does NOT keyword-match user text on a bridge. It keeps plan state in the
-    client/session and sends the model full prior turns (including createPlan tool calls).
-    We only nudge when that history is visible in the incoming messages.
-    """
-    if not plan_name or not isinstance(obj, dict):
+def _user_wants_plan_update(text: str) -> bool:
+    if not text:
         return False
-    tools = obj.get("tools")
-    has_plan_tool = False
-    if isinstance(tools, list):
-        for t in tools:
-            if not isinstance(t, dict):
-                continue
-            fn = t.get("function") if isinstance(t.get("function"), dict) else t
-            if _is_plan_function_name(str((fn or {}).get("name") or "")):
-                has_plan_tool = True
-                break
-    if not has_plan_tool:
+    markers = (
+        "更新计划", "优化当前计划", "简化当前计划", "继续优化", "压缩一版", "最短版",
+        "修改原计划", "迭代简单", "简化当前", "优化当前",
+        "update plan", "modify plan", "revise plan", "simplify", "iterate plan",
+    )
+    low = text.lower()
+    return any(m.lower() in low for m in markers)
+
+
+def _extract_workspace_plan_slugs(messages) -> list[str]:
+    slugs: list[str] = []
+    if not isinstance(messages, list):
+        return slugs
+    pat = re.compile(r"workspace-tidy[a-z0-9-]*", re.IGNORECASE)
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        txt = _message_text_for_plan_hint(msg)
+        for m in pat.finditer(txt):
+            val = m.group(0).strip()
+            if val and val not in slugs:
+                slugs.append(val)
+    return slugs
+
+
+def _thread_plan_anchor(messages) -> str:
+    """Official plan --continue keeps the same args.name; anchor = first plan identity in thread."""
+    names = _extract_plan_names_from_messages(messages)
+    if names:
+        return names[0]
+    slugs = _extract_workspace_plan_slugs(messages)
+    if slugs:
+        return slugs[0]
+    return ""
+
+
+def resolve_plan_lock_name(obj: dict) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    messages = obj.get("messages")
+    user_text = _latest_user_text(messages)
+    if _user_wants_new_plan(user_text):
+        return ""
+    anchor = _thread_plan_anchor(messages)
+    if not anchor:
+        return ""
+    if _user_wants_plan_update(user_text) or _conversation_has_createplan_history(messages):
+        return anchor
+    return ""
+
+
+def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
+    """Reuse args.name when thread already has a plan anchor (official --continue semantics)."""
+    if not plan_name or not isinstance(obj, dict):
         return False
     messages = obj.get("messages")
     if _user_wants_new_plan(_latest_user_text(messages)):
         return False
-    return _conversation_has_createplan_history(messages)
+    if _user_wants_plan_update(_latest_user_text(messages)) and plan_name:
+        return True
+    return _conversation_has_createplan_history(messages) and bool(plan_name)
 
 
 def make_plan_update_nudge(plan_name: str):
@@ -471,13 +512,11 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
                 break
     force_initial_tool = actionable and not has_tool_result
     plan_names = _extract_plan_names_from_messages(messages)
-    plan_update_name = plan_names[-1] if plan_names else ""
+    plan_update_name = _thread_plan_anchor(messages) or (plan_names[-1] if plan_names else "")
     add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
-    plan_lock_name = ""
-    if plan_update_name and add_plan_nudge:
-        plan_lock_name = plan_update_name
-    elif plan_update_name and _conversation_has_createplan_history(messages) and not _user_wants_new_plan(_latest_user_text(messages)):
-        plan_lock_name = plan_update_name
+    plan_lock_name = resolve_plan_lock_name(out)
+    if plan_lock_name:
+        plan_update_name = plan_lock_name
         add_plan_nudge = True
     if force_initial_tool and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Agent compatibility instruction" in m.get("content", "") for m in messages)
