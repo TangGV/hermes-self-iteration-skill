@@ -1,5 +1,6 @@
 """Official CLI-derived acceptance tests for Plan lock helpers."""
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -9,34 +10,41 @@ mod = importlib.util.module_from_spec(spec)
 sys.modules["subapi_server"] = mod
 spec.loader.exec_module(mod)
 
-def test_update_intent_locks_first_slug():
+
+def test_locks_first_createplan_name():
     messages = [
-        {"role": "user", "content": "制定计划"},
-        {"role": "assistant", "content": 'Created Plan workspace-tidy-v3'},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "CreatePlan",
+                        "arguments": '{"name":"workspace-tidy-v3","plan":"# x"}',
+                    }
+                }
+            ],
+        },
         {"role": "user", "content": "更新计划当前的迭代简单点"},
     ]
-    obj = {"messages": messages, "tools": []}
+    obj = {"messages": messages}
     assert mod.resolve_plan_lock_name(obj) == "workspace-tidy-v3"
 
-def test_plan_md_path_anchor():
+
+def test_plan_md_path_fallback():
     messages = [
         {"role": "assistant", "content": "已在 workspace-tidy-v3_7e4c1294.plan.md 上完成压缩"},
         {"role": "user", "content": "更新计划当前的迭代简单点"},
     ]
-    obj = {"messages": messages}
-    assert mod._thread_plan_anchor(messages, "更新计划当前的迭代简单点") == "workspace-tidy-v3"
+    assert mod._first_plan_identity(messages) == "workspace-tidy-v3"
 
-def test_explicit_slug_in_user():
-    messages = [{"role": "user", "content": "在 workspace-tidy-v3 上压缩"}]
-    assert mod._thread_plan_anchor(messages, messages[0]["content"]) == "workspace-tidy-v3"
 
 def test_no_lock_on_new_plan():
     messages = [{"role": "user", "content": "新建计划，另起一个"}]
     obj = {"messages": messages}
     assert mod.resolve_plan_lock_name(obj) == ""
 
+
 def test_short_plan_optimize_user_query_only():
-    """Cursor wraps user text; system reminder contains English 'new plan' — must not disable lock."""
     messages = [
         {
             "role": "assistant",
@@ -62,14 +70,9 @@ def test_short_plan_optimize_user_query_only():
     assert mod.resolve_plan_lock_name(obj) == "short-plan"
 
 
-def test_multi_plan_history_locks_last_active():
-    import json
+def test_polluted_history_still_locks_session_root():
     messages = []
-    for name in (
-        "workspace-tidy",
-        "workspace-tidy-v3",
-        "workspace-tidy-minimal-optimized",
-    ):
+    for name in ("workspace-tidy", "workspace-tidy-v3", "workspace-tidy-minimal-optimized"):
         messages.append(
             {
                 "role": "assistant",
@@ -83,23 +86,22 @@ def test_multi_plan_history_locks_last_active():
                 ],
             }
         )
-    messages.append({"role": "user", "content": "更新计划当前的迭代简单点"})
+    messages.append({"role": "user", "content": "优化v2版本"})
     obj = {"messages": messages}
-    assert mod.resolve_plan_lock_name(obj) == "workspace-tidy-minimal-optimized"
+    assert mod.resolve_plan_lock_name(obj) == "workspace-tidy"
 
 
 def test_fix_createplan_rewrites_name() -> None:
-    import json
-    raw = '{"name":"workspace-tidy-minimal","plan":"# x"}'
-    out = mod._fix_createplan_arguments_text(raw, "CreatePlan", "workspace-tidy-minimal-optimized")
-    assert json.loads(out)["name"] == "workspace-tidy-minimal-optimized"
+    raw = '{"name":"short-plan-optimized","plan":"# v2"}'
+    out = mod._fix_createplan_arguments_text(raw, "CreatePlan", "short-plan")
+    assert json.loads(out)["name"] == "short-plan"
+
 
 if __name__ == "__main__":
-    test_update_intent_locks_first_slug()
-    test_plan_md_path_anchor()
-    test_explicit_slug_in_user()
+    test_locks_first_createplan_name()
+    test_plan_md_path_fallback()
     test_no_lock_on_new_plan()
     test_short_plan_optimize_user_query_only()
-    test_multi_plan_history_locks_last_active()
+    test_polluted_history_still_locks_session_root()
     test_fix_createplan_rewrites_name()
     print("OK all plan lock tests")

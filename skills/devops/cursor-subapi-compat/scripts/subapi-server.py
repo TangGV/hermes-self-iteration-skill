@@ -350,12 +350,13 @@ def _latest_user_text(messages) -> str:
 
 
 def _user_wants_new_plan(text: str) -> bool:
+    """Only explicit user intent to start a new plan (user_query text). No keyword lists for updates."""
     if not text:
-        return False
-    if _user_wants_plan_update(text):
         return False
     low = text.lower()
     if "更新计划" in text or "update plan" in low:
+        return False
+    if "不要新建" in text or "不要新建计划" in text or "别再新建" in text:
         return False
     markers = (
         "新建计划", "另一个计划", "重新制定", "重新创建", "从零", "另起",
@@ -363,10 +364,35 @@ def _user_wants_new_plan(text: str) -> bool:
     )
     if any(m.lower() in low for m in markers):
         return True
-    # Avoid matching 新计划 inside 更新计划
     if "新计划" in text and "更新计划" not in text:
         return True
     return False
+
+
+def _first_plan_identity(messages) -> str:
+    """Official session root: first CreatePlan.args.name in transcript order."""
+    names = _extract_plan_names_from_messages(messages)
+    if names:
+        return names[0]
+    slugs = _extract_plan_slugs_from_plan_md_paths(messages)
+    return slugs[0] if slugs else ""
+
+
+def resolve_plan_lock_name(obj: dict) -> str:
+    """Custom API parity: after the first CreatePlan in messages, force stable args.name on outbound SSE.
+
+    Official GUI keeps plan state client-side; the bridge only sees messages. Model often emits
+    new titles (official CLI also uses v2/v3 names on casual optimize). Lock to the **first**
+    plan identity in the thread unless user_query explicitly requests a new plan.
+    """
+    if not isinstance(obj, dict):
+        return ""
+    messages = obj.get("messages")
+    if _user_wants_new_plan(_latest_user_text(messages)):
+        return ""
+    if not _conversation_has_createplan_history(messages):
+        return ""
+    return _first_plan_identity(messages)
 
 
 def _conversation_has_createplan_history(messages) -> bool:
@@ -389,7 +415,33 @@ def _conversation_has_createplan_history(messages) -> bool:
     return False
 
 
+def _extract_plan_slugs_from_plan_md_paths(messages) -> list[str]:
+    slugs: list[str] = []
+    if not isinstance(messages, list):
+        return slugs
+    pat = re.compile(r"([a-z][a-z0-9]+(?:-[a-z0-9]+)*)_[a-f0-9]{6,}\.plan\.md", re.IGNORECASE)
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        txt = _message_text_for_plan_hint(msg)
+        for m in pat.finditer(txt):
+            val = m.group(1).strip()
+            if val and val not in slugs:
+                slugs.append(val)
+    return slugs
+
+
 PLAN_SSE_CHAR_CHUNK = 24
+
+
+def _latest_user_turn_plan_mode(messages) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        return "Plan mode is active" in _message_text_for_plan_hint(msg)
+    return False
 
 
 def _iter_char_chunks(text: str, size: int = PLAN_SSE_CHAR_CHUNK):
@@ -419,127 +471,6 @@ def _fix_createplan_arguments_text(arg_text: str, tool_name: str, plan_lock_name
     )
 
 
-def _user_wants_plan_update(text: str) -> bool:
-    if not text:
-        return False
-    markers = (
-        "更新计划", "优化当前计划", "简化当前计划", "继续优化", "压缩一版", "最短版",
-        "修改原计划", "迭代简单", "简化当前", "优化当前", "当前计划", "优先当前计划",
-        "当前版本", "简化当前计划优先", "优化计划", "优化计划继续", "继续优化计划",
-        "继续优化v", "计划中没见到",
-        "update plan", "modify plan", "revise plan", "simplify", "iterate plan",
-    )
-    low = text.lower()
-    if any(m.lower() in low for m in markers):
-        return True
-    if re.search(r"(优化|继续|简化|更新|调整|扩展|补充|充实|完善|细化).{0,16}(计划|规划|方案)|(?:计划|规划|方案).{0,16}(优化|继续|简化|更新|扩展|补充)", text):
-        return True
-    if re.search(r"(多点|更多|加强).{0,8}(内容|优化|补充)", text):
-        return True
-    return False
-
-
-def _latest_user_turn_plan_mode(messages) -> bool:
-    if not isinstance(messages, list):
-        return False
-    for msg in reversed(messages):
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        return "Plan mode is active" in _message_text_for_plan_hint(msg)
-    return False
-
-
-def _extract_workspace_plan_slugs(messages) -> list[str]:
-    slugs: list[str] = []
-    if not isinstance(messages, list):
-        return slugs
-    pat = re.compile(r"workspace-tidy[a-z0-9-]*", re.IGNORECASE)
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        txt = _message_text_for_plan_hint(msg)
-        for m in pat.finditer(txt):
-            val = m.group(0).strip()
-            if val and val not in slugs:
-                slugs.append(val)
-    return slugs
-
-
-def _extract_plan_slugs_from_plan_md_paths(messages) -> list[str]:
-    slugs: list[str] = []
-    if not isinstance(messages, list):
-        return slugs
-    pat = re.compile(r"([a-z][a-z0-9]+(?:-[a-z0-9]+)*)_[a-f0-9]{6,}\.plan\.md", re.IGNORECASE)
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        txt = _message_text_for_plan_hint(msg)
-        for m in pat.finditer(txt):
-            val = m.group(1).strip()
-            if val and val not in slugs:
-                slugs.append(val)
-    return slugs
-
-
-def _explicit_plan_slug_from_user(text: str) -> str:
-    if not text:
-        return ""
-    m = re.search(r"(workspace-tidy[a-z0-9-]*)", text, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else ""
-
-
-def _prefer_specific_workspace_slugs(slugs: list[str]) -> list[str]:
-    if not slugs:
-        return slugs
-    long = [s for s in slugs if s.lower() != "workspace-tidy"]
-    return long if long else slugs
-
-
-def _thread_plan_anchor(messages, user_text: str = "") -> str:
-    """Lock target for CreatePlan.args.name.
-
-    Official CLI keeps one name for the whole session. Cursor GUI + custom API often
-    accumulates many historical CreatePlan names in messages; updates must target the
-    **active** plan (last CreatePlan), not the first slug like bare `workspace-tidy`.
-    """
-    explicit = _explicit_plan_slug_from_user(user_text)
-    if explicit:
-        return explicit
-    names = _extract_plan_names_from_messages(messages)
-    if names:
-        if _user_wants_plan_update(user_text) or len(names) > 1:
-            return names[-1]
-        return names[0]
-    for src in (
-        _prefer_specific_workspace_slugs(_extract_workspace_plan_slugs(messages)),
-        _extract_plan_slugs_from_plan_md_paths(messages),
-    ):
-        if src:
-            if _user_wants_plan_update(user_text) or len(src) > 1:
-                return src[-1]
-            return src[0]
-    return ""
-
-
-def resolve_plan_lock_name(obj: dict) -> str:
-    if not isinstance(obj, dict):
-        return ""
-    messages = obj.get("messages")
-    user_text = _latest_user_text(messages)
-    if _user_wants_new_plan(user_text):
-        return ""
-    anchor = _thread_plan_anchor(messages, user_text)
-    if not anchor:
-        return ""
-    if _user_wants_plan_update(user_text):
-        return anchor
-    if _conversation_has_createplan_history(messages):
-        if _latest_user_turn_plan_mode(messages):
-            return anchor
-        return anchor
-    return ""
-
-
 def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
     """Reuse args.name when thread already has a plan anchor (official --continue semantics)."""
     if not plan_name or not isinstance(obj, dict):
@@ -547,8 +478,6 @@ def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
     messages = obj.get("messages")
     if _user_wants_new_plan(_latest_user_text(messages)):
         return False
-    if _user_wants_plan_update(_latest_user_text(messages)) and plan_name:
-        return True
     return _conversation_has_createplan_history(messages) and bool(plan_name)
 
 
@@ -592,7 +521,7 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
                 break
     force_initial_tool = actionable and not has_tool_result
     plan_names = _extract_plan_names_from_messages(messages)
-    plan_update_name = _thread_plan_anchor(messages, _latest_user_text(messages)) or (plan_names[-1] if plan_names else "")
+    plan_update_name = _first_plan_identity(messages) or (plan_names[0] if plan_names else "")
     add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
     plan_lock_name = resolve_plan_lock_name(out)
     if plan_lock_name:
