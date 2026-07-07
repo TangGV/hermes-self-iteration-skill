@@ -35,6 +35,33 @@ def test_no_lock_on_new_plan():
     obj = {"messages": messages}
     assert mod.resolve_plan_lock_name(obj) == ""
 
+def test_short_plan_optimize_user_query_only():
+    """Cursor wraps user text; system reminder contains English 'new plan' — must not disable lock."""
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "CreatePlan",
+                        "arguments": '{"name":"short-plan","plan":"# x"}',
+                    }
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": (
+                "<system_reminder>Do not create a new plan until user confirms.</system_reminder>\n"
+                "<user_query>多点内容优化下</user_query>"
+            ),
+        },
+    ]
+    obj = {"messages": messages}
+    assert mod._user_wants_new_plan(mod._latest_user_text(messages)) is False
+    assert mod.resolve_plan_lock_name(obj) == "short-plan"
+
+
 def test_multi_plan_history_locks_last_active():
     import json
     messages = []
@@ -72,6 +99,7 @@ if __name__ == "__main__":
     test_plan_md_path_anchor()
     test_explicit_slug_in_user()
     test_no_lock_on_new_plan()
+    test_short_plan_optimize_user_query_only()
     test_multi_plan_history_locks_last_active()
     test_fix_createplan_rewrites_name()
     print("OK all plan lock tests")

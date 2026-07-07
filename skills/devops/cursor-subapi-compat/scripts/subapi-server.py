@@ -341,7 +341,11 @@ def _latest_user_text(messages) -> str:
         return ""
     for msg in reversed(messages):
         if isinstance(msg, dict) and msg.get("role") == "user":
-            return _message_text_for_plan_hint(msg)
+            blob = _message_text_for_plan_hint(msg)
+            m = re.search(r"<user_query>\s*(.*?)\s*</user_query>", blob, flags=re.DOTALL | re.IGNORECASE)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+            return blob
     return ""
 
 
@@ -428,7 +432,9 @@ def _user_wants_plan_update(text: str) -> bool:
     low = text.lower()
     if any(m.lower() in low for m in markers):
         return True
-    if re.search(r"(优化|继续|简化|更新|调整).{0,12}计划|计划.{0,12}(优化|继续|简化|更新)", text):
+    if re.search(r"(优化|继续|简化|更新|调整|扩展|补充|充实|完善|细化).{0,16}(计划|规划|方案)|(?:计划|规划|方案).{0,16}(优化|继续|简化|更新|扩展|补充)", text):
+        return True
+    if re.search(r"(多点|更多|加强).{0,8}(内容|优化|补充)", text):
         return True
     return False
 
