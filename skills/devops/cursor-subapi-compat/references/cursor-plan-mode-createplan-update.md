@@ -23,13 +23,7 @@ Cursor Plan compatibility instruction: this conversation already has an existing
 
 This preserves official Cursor semantics: use `CreatePlan`, but keep `args.name` stable.
 
-The bridge also annotates the transformed Responses request metadata with:
-
-```json
-{"cursor_plan_update_name":"<existing plan name>"}
-```
-
-for easier request inspection. This does not change model/routing/effort.
+Do **not** attach `metadata` on the upstream `/v1/responses` body — New API/upstream returns `Unsupported parameter: metadata`. Plan-update behavior relies on the injected system nudge only.
 
 ## Verification command
 

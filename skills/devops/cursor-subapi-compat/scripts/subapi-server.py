@@ -409,8 +409,8 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool]:
     tools = chat_tools_to_responses_tools(out.get("tools"))
     if tools:
         resp["tools"] = tools
-        if out.get("_cursor_plan_update_name"):
-            resp.setdefault("metadata", {})["cursor_plan_update_name"] = out.get("_cursor_plan_update_name")
+        # Do not forward `metadata` to /v1/responses — upstream rejects Unsupported parameter: metadata.
+        # Plan-update hint stays in the injected system message only (_cursor_plan_update_name is for local audit).
         if force_initial_tool:
             resp["tool_choice"] = "required"
         elif out.get("tool_choice") not in (None, {}, "none"):
