@@ -241,3 +241,15 @@ Use this flow before diagnosing model/tool behavior from screenshots:
 ### GUI self-test pitfall: `Auto` is not subapi3
 
 When creating a fresh Cursor Agent, the bottom model selector may show `Auto`. A successful edit in that state can use official Cursor/Composer (`composer-2.5-fast`) and native `StrReplace/edit_file_v2`, even if OpenAI Base URL and key are configured. Evidence appears in Cursor state as `providerOptions.cursor.modelName: composer-2.5-fast` and tool result `StrReplace` / `edit_file_v2`, not VPS `/cursor/v1` `gpt-5.5` tool calls. Always verify bottom model is explicitly `gpt-5.5` and confirm VPS journal `model=gpt-5.5` before counting a GUI edit as subapi3 coverage.
+
+
+### More automatic GUI self-test: local proxy
+
+If Cursor's model dropdown only shows `Auto`, do not keep clicking the UI. Use the local proxy harness instead:
+
+- Script: `C:/Users/t/cursor-protocol-lab/harness/cursor_local_proxy.py`
+- Cursor Base URL for tests: `http://127.0.0.1:18080/cursor/v1`
+- Upstream target: `https://subapi3.aigcfast.com/cursor/v1`
+- The proxy forces `model=gpt-5.5`, injects the known-good root/codex-pro key from the local secret file, and records raw/forwarded requests plus responses under `C:/Users/t/cursor-protocol-lab/artifacts/local_proxy/<req_id>/`.
+
+Verified smoke: sending `model=Auto` through the proxy produced HTTP 200 from subapi3, response `model=gpt-5.5`, and artifact `changed.model.from=Auto`, `changed.model.to=gpt-5.5`. This is the preferred automated GUI path because Cursor can display Auto while the proxy guarantees the actual upstream model.
