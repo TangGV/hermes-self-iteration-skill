@@ -817,6 +817,42 @@ def salted_retry_body(body: bytes, reason: str = "empty") -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def empty_retry_body(body: bytes, reason: str = "empty") -> bytes:
+    """Retry an empty upstream completion without changing model/effort.
+
+    A plain salted retry can hit the same xAI/NewAPI empty-stream behavior.  For
+    Cursor Agent requests with tools, make the retry actionable by requiring a
+    tool call and prepending a short system nudge.  This avoids returning a
+    normal assistant diagnostic that Cursor treats as a completed turn and then
+    reconnects/retries around.
+    """
+    try:
+        obj = json.loads(salted_retry_body(body, reason).decode("utf-8"))
+    except Exception:
+        return salted_retry_body(body, reason)
+    if not isinstance(obj, dict):
+        return body
+    tools = obj.get("tools")
+    if isinstance(tools, list) and tools:
+        obj["tool_choice"] = "required"
+        nudge = {
+            "role": "system",
+            "content": (
+                "Cursor bridge empty-stream retry: the previous upstream attempt returned no text and no tool call. "
+                "Continue the same task now by calling the appropriate tool. For file/code edits, prefer ApplyPatch; "
+                "do not finish with prose only."
+            ),
+        }
+        inp = obj.get("input")
+        if isinstance(inp, list):
+            obj["input"] = [nudge] + inp
+        elif inp:
+            obj["input"] = [nudge, {"role": "user", "content": str(inp)}]
+        else:
+            obj["input"] = [nudge]
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def sse_event(event, data):
     if event:
         return f"event: {event}\n".encode() + f"data: {data}\n\n".encode()
@@ -1540,7 +1576,8 @@ class Handler(BaseHTTPRequestHandler):
                     if empty_upstream_completion:
                         retried_empty_upstream = True
                         self.log_message("empty-upstream retrying once req_id=%s with salted prompt_cache_key chunks=%s bytes=%s finish_seen=%s", req_id, chunk_count, len(buf), finish_seen)
-                        retry_body = salted_retry_body(body, "empty") if body is not None else body
+                        retry_body = empty_retry_body(body, "empty") if body is not None else body
+                        self.log_message("empty-upstream retry body prepared req_id=%s force_tool_choice=%s", req_id, b'\"tool_choice\":\"required\"' in (retry_body or b''))
                         retry_req = Request(UPSTREAM + upath, data=retry_body, headers=self.make_headers(len(retry_body) if retry_body is not None else None), method=method)
                         try:
                             with urlopen(retry_req, timeout=3600) as retry_resp:
