@@ -7,6 +7,8 @@ description: Cursor IDE：`api.aigcfast.com`（8326 CPA）与 `subapi.aigcfast.c
 
 ## Context Usage / 压缩控制
 
+- **Cursor 编辑器逐行 diff / ApplyPatch 体验：** Cursor 原始 `ApplyPatch` 是 `function` wrapper 里的 **custom grammar tool**（`function.type=custom` + `format.type=grammar`），转 `/v1/responses` 时必须保留为 `{"type":"custom","name":"ApplyPatch","format":...}`；如果扁平化成普通 JSON function，会丢 patch grammar，模型更容易走 `Write/Shell` 或生成差体验补丁，Cursor 原生 inline diff/编辑器渲染会变差。验证看 SubAPI 的 Cursor 翻译服务 journal：`edit-tool-audit ... inbound_custom=ApplyPatch outbound_custom=ApplyPatch applypatch_custom_preserved=True`；回归脚本 `scripts/test_custom_applypatch_tool.py`。
+
 - Context Usage 0% / 未压缩：先看 `references/cursor-context-usage-control.md`。
 - Cursor UI 主要吃 Agent checkpoint `tokenDetails.usedTokens/maxTokens`，但 `/cursor/v1` 的 OpenAI-compatible streaming usage **也会影响递增统计**。
 - **关键坑（2026-07-01 用户实测确认）：usage 只能出现在最终 `choices: []` chunk。** finish chunk 不带 usage；再发一条 `data: {"choices":[],"usage":{...}}`；然后 `[DONE]`。双写 usage（finish chunk + final chunk）会刷新/重置或显示异常，单尾部 usage 后用户确认“递增，没重置”。详见 `references/cursor-openai-usage-tail-chunk.md`。

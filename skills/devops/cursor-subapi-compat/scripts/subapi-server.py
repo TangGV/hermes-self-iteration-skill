@@ -208,6 +208,35 @@ def chat_messages_to_responses_input(messages):
     return out
 
 
+def _responses_tool_from_cursor_function(fn: dict):
+    """Translate Cursor's ChatCompletions tool wrapper to Responses tools.
+
+    Cursor exposes ApplyPatch as a custom grammar tool nested under the
+    ChatCompletions `function` wrapper:
+      {"type":"function","function":{"type":"custom","name":"ApplyPatch","format":...}}
+    The previous bridge flattened every tool to `type:function`, which dropped
+    the grammar.  Losing that grammar makes upstream models treat ApplyPatch as
+    an ordinary JSON function and degrades Cursor's native editor/inline-diff
+    path.  Preserve custom grammar tools exactly enough for Responses.
+    """
+    if not isinstance(fn, dict):
+        return None
+    name = fn.get("name") or "tool"
+    if fn.get("type") == "custom" or fn.get("format") is not None:
+        x = {"type": "custom", "name": name}
+        if fn.get("description") is not None:
+            x["description"] = fn.get("description")
+        if fn.get("format") is not None:
+            x["format"] = fn.get("format")
+        return x
+    x = {"type": "function", "name": name}
+    if fn.get("description") is not None:
+        x["description"] = fn.get("description")
+    if fn.get("parameters") is not None:
+        x["parameters"] = fn.get("parameters")
+    return x
+
+
 def chat_tools_to_responses_tools(tools):
     if not isinstance(tools, list):
         return None
@@ -216,22 +245,55 @@ def chat_tools_to_responses_tools(tools):
         if not isinstance(t, dict):
             continue
         if t.get("type") == "function" and isinstance(t.get("function"), dict):
-            fn = t["function"]
-            x = {"type": "function", "name": fn.get("name") or "tool"}
-            if fn.get("description") is not None:
-                x["description"] = fn.get("description")
-            if fn.get("parameters") is not None:
-                x["parameters"] = fn.get("parameters")
+            x = _responses_tool_from_cursor_function(t["function"])
+            if x:
+                out.append(x)
+        elif t.get("type") == "custom" and t.get("name"):
+            x = {"type": "custom", "name": t.get("name")}
+            if t.get("description") is not None:
+                x["description"] = t.get("description")
+            if t.get("format") is not None:
+                x["format"] = t.get("format")
             out.append(x)
         elif t.get("type") == "function" and t.get("name"):
             out.append(t)
     return out or None
 
 
+def _tool_names_from_chat_tools(tools):
+    names = []
+    custom = []
+    if isinstance(tools, list):
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function") if isinstance(t.get("function"), dict) else t
+            name = fn.get("name") if isinstance(fn, dict) else None
+            if isinstance(name, str) and name:
+                names.append(name)
+                if isinstance(fn, dict) and (fn.get("type") == "custom" or fn.get("format") is not None):
+                    custom.append(name)
+    return names, custom
+
+
+def _tool_names_from_responses_tools(tools):
+    names = []
+    custom = []
+    if isinstance(tools, list):
+        for t in tools:
+            if isinstance(t, dict):
+                name = t.get("name")
+                if isinstance(name, str) and name:
+                    names.append(name)
+                    if t.get("type") == "custom" or t.get("format") is not None:
+                        custom.append(name)
+    return names, custom
+
+
 def make_actionable_nudge():
     return {
         "role": "system",
-        "content": "Cursor Agent compatibility instruction: the user is asking for an actionable coding/file/command task. Do not finish with prose only. Use the available tools to perform the requested action. Only provide a final text answer after the necessary tool calls have completed.",
+        "content": "Cursor Agent compatibility instruction: the user is asking for an actionable coding/file/command task. Do not finish with prose only. Use the available tools to perform the requested action. For source-code/file edits, prefer the ApplyPatch tool over Shell or full-file Write so Cursor can render native editor diffs. Only provide a final text answer after the necessary tool calls have completed.",
     }
 
 
@@ -685,11 +747,14 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
         resp["max_output_tokens"] = out["max_tokens"]
     if messages is not None:
         resp["input"] = chat_messages_to_responses_input(messages)
+    inbound_tool_names, inbound_custom_tools = _tool_names_from_chat_tools(out.get("tools"))
     tools = chat_tools_to_responses_tools(out.get("tools"))
     if tools:
         resp["tools"] = tools
+        outbound_tool_names, outbound_custom_tools = _tool_names_from_responses_tools(tools)
+        changed = changed or bool(set(inbound_custom_tools) & set(outbound_custom_tools))
         # Do not forward `metadata` to /v1/responses — upstream rejects Unsupported parameter: metadata.
-        # Plan-update hint stays in the injected system message only (_cursor_plan_update_name is for local audit).
+
         if force_initial_tool:
             resp["tool_choice"] = "required"
         elif out.get("tool_choice") not in (None, {}, "none"):
@@ -1334,6 +1399,20 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(rr, dict):
                             request_reasoning = str(rr.get("effort") or request_reasoning)
                         self.log_message("req-audit %s", audit_request(robj, mode))
+                        try:
+                            in_tool_names, in_custom_tools = _tool_names_from_chat_tools(obj.get("tools"))
+                            out_tool_names, out_custom_tools = _tool_names_from_responses_tools(robj.get("tools"))
+                            self.log_message(
+                                "edit-tool-audit req_id=%s inbound_custom=%s outbound_custom=%s applypatch_custom_preserved=%s inbound_tools=%s outbound_tools=%s",
+                                req_id,
+                                ",".join(in_custom_tools),
+                                ",".join(out_custom_tools),
+                                "ApplyPatch" in in_custom_tools and "ApplyPatch" in out_custom_tools,
+                                ",".join(in_tool_names[:30]),
+                                ",".join(out_tool_names[:30]),
+                            )
+                        except Exception as audit_e:
+                            self.log_message("edit-tool-audit failed req_id=%s error=%r", req_id, audit_e)
                         if plan_lock_name:
                             self.log_message("plan-lock name=%s", plan_lock_name[:120])
                             if isinstance(robj, dict) and isinstance(robj.get("tools"), list):
