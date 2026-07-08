@@ -225,3 +225,19 @@ ssh root@62.106.70.67 "systemctl restart cursor-cpa-compat subapi-cursor-compat 
 - `references/composer25-cli-full-flow-test-plan.md` — 本机 Cursor Agent CLI + Composer 2.5 全流程测试计划：smoke、读写、修代码/pytest、大上下文、stream-json 模型确认、VPS `/cursor/v1` 监测对照与报告模板
 - `references/cursor-plan-mode-createplan-update.md` — Cursor Plan 模式官方 Composer 2.5 对比：创建和修改计划都用 `CreatePlan`；更新原计划的关键是复用相同 `args.name`，SubAPI 桥接层通过历史计划名 nudge 防止模型新建计划名
 - `cliproxyapi-cpa-ops` → `references/cpa-windows-local-client-proxy.md`、`references/cpa-client-api-key-rate-limit.md` — 本机代理与 CPA 限流文案"
+
+## Cursor GUI self-test recognition flow (2026-07-08)
+
+Use this flow before diagnosing model/tool behavior from screenshots:
+
+1. In Cursor GUI `Settings > Models > API Keys`, ensure OpenAI Base URL is exactly `https://subapi3.aigcfast.com/cursor/v1` and OpenAI API Key shows `Secret saved`.
+2. Do **not** blindly use the latest root token. On VPS3 New API (`/root/new-api/data/one-api.db`), root may have multiple tokens in different groups. A `503 model_not_found ... under group 生图` means the GUI key is a root token from the image group, not a coding group.
+3. Select a root/user token whose group has `gpt-5.5` channels (observed good group: `codex-pro`; redact the token, log only sha8/len/group). Verify first with a direct curl to `/cursor/v1/chat/completions` using `model:gpt-5.5`; expected `HTTP 200` and a simple text reply.
+4. Only after curl succeeds, paste that key into Cursor GUI. Then send a safe GUI ping through Agent with selected model `gpt-5.5`.
+5. Confirm on VPS3 journal: `path=/cursor/v1/chat/completions`, `model=gpt-5.5`, `mode=chat-via-responses`, `upstream_status=200`, `status=ok`. If this is present, GUI self-test is wired; any later failure is model/tool/protocol behavior, not GUI connectivity.
+6. For edit tests, use an isolated file under `C:/Users/t/cursor-protocol-lab/gui-selftest/` and verify with both file diff and journal fields (`has_tool_calls`, `tool_names`, `finish_seen`, `applypatch_custom_preserved`).
+
+
+### GUI self-test pitfall: `Auto` is not subapi3
+
+When creating a fresh Cursor Agent, the bottom model selector may show `Auto`. A successful edit in that state can use official Cursor/Composer (`composer-2.5-fast`) and native `StrReplace/edit_file_v2`, even if OpenAI Base URL and key are configured. Evidence appears in Cursor state as `providerOptions.cursor.modelName: composer-2.5-fast` and tool result `StrReplace` / `edit_file_v2`, not VPS `/cursor/v1` `gpt-5.5` tool calls. Always verify bottom model is explicitly `gpt-5.5` and confirm VPS journal `model=gpt-5.5` before counting a GUI edit as subapi3 coverage.
