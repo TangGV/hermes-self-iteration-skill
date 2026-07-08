@@ -241,3 +241,19 @@ Use this flow before diagnosing model/tool behavior from screenshots:
 ### GUI self-test pitfall: `Auto` is not subapi3
 
 When creating a fresh Cursor Agent, the bottom model selector may show `Auto`. A successful edit in that state can use official Cursor/Composer (`composer-2.5-fast`) and native `StrReplace/edit_file_v2`, even if OpenAI Base URL and key are configured. Evidence appears in Cursor state as `providerOptions.cursor.modelName: composer-2.5-fast` and tool result `StrReplace` / `edit_file_v2`, not VPS `/cursor/v1` `gpt-5.5` tool calls. Always verify bottom model is explicitly `gpt-5.5` and confirm VPS journal `model=gpt-5.5` before counting a GUI edit as subapi3 coverage.
+
+
+### Correct automatic GUI self-test: VPS3 remote tap
+
+Cursor GUI requests must hit a public remote listener, not a Windows-local proxy. Use this tap endpoint for automated GUI tests:
+
+- Cursor Base URL: `https://subapi3.aigcfast.com/cursor-tap/v1`
+- VPS3 service: `cursor-remote-tap.service`
+- Listener: `127.0.0.1:8330`
+- Nginx route: `/cursor-tap/v1/ -> http://127.0.0.1:8330/cursor/v1/`
+- Forward target: `http://127.0.0.1:8327/cursor/v1`
+- Capture dir: `/var/log/cursor-remote-tap/<req_id>/`
+
+The tap captures `request.original.bin`, writes `request.forwarded.bin`, metadata, response body, and response metadata. It forces `model=gpt-5.5`, injects the known-good root/codex-pro token from New API DB token id 10, and redacts secrets in metadata (`token_sha8` only).
+
+Verified smoke: POSTing `model=Auto` to `https://subapi3.aigcfast.com/cursor-tap/v1/chat/completions` returned HTTP 200 with header `X-Cursor-Remote-Tap: 1`; artifact showed `changed.model.from=Auto`, `changed.model.to=gpt-5.5`, `upstream_status=200`, `ok=true`.
