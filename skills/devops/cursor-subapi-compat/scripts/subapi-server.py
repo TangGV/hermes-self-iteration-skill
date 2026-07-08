@@ -654,6 +654,70 @@ def make_plan_update_nudge(plan_name: str, plan_paths: list[str] | None = None):
     }
 
 
+def _plan_md_read_result_seen(messages, plan_paths: list[str] | None = None) -> str:
+    """Return the latest active .plan.md path whose ReadFile result is already in context."""
+    if not isinstance(messages, list):
+        return ""
+    normalized_paths = []
+    for p in plan_paths or []:
+        if isinstance(p, str) and p:
+            normalized_paths.append(p.replace("\\", "/"))
+    read_call_paths: dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            name = str(fn.get("name") or "")
+            if name.lower() not in {"readfile", "read_file", "read_file_v2"}:
+                continue
+            args = _safe_json_obj(fn.get("arguments")) or {}
+            path = args.get("path") or args.get("targetFile") or args.get("effectiveUri")
+            if isinstance(path, str) and path.lower().endswith(".plan.md"):
+                tid = str(tc.get("id") or "")
+                if tid:
+                    read_call_paths[tid] = path.replace("\\", "/")
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "tool":
+            continue
+        name = str(msg.get("name") or "")
+        if name.lower() not in {"readfile", "read_file", "read_file_v2"}:
+            continue
+        txt = _message_text_for_plan_hint(msg)
+        # Cursor ReadFile tool results include L1:--- and the plan frontmatter/body.
+        if "L1:" not in txt and "name:" not in txt and "todos:" not in txt:
+            continue
+        tid = str(msg.get("tool_call_id") or "")
+        if tid and tid in read_call_paths:
+            return read_call_paths[tid]
+        txt_norm = txt.replace("\\", "/").lower()
+        for p in reversed(normalized_paths):
+            base = p.rsplit("/", 1)[-1]
+            if base and base.lower() in txt_norm:
+                return p
+        m = re.search(r"([^\s'\"<>]+_[a-f0-9]{6,}\.plan\.md)", txt, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).replace("\\", "/")
+    return ""
+
+
+def make_plan_applypatch_after_read_nudge(plan_path: str):
+    safe_path = str(plan_path).replace("\n", " ")[:260]
+    return {
+        "role": "system",
+        "content": (
+            "Cursor Plan compatibility instruction — the active plan markdown has already been read in this conversation. "
+            f"You MUST now update that exact plan file with an ApplyPatch (or equivalent edit/write tool) targeting {safe_path!r}. "
+            "Do not answer with future intent such as 'I will update' / '我会修改'. "
+            "Do not call CreatePlan. Do not read broad project files. The next assistant output for this plan revision should include the edit tool call."
+        ),
+    }
+
+
 def strip_createplan_tool_when_locked(obj: dict, plan_lock_name: str) -> bool:
     """Official follow-up turns use edit-in-place, not a second CreatePlan tool call."""
     if not plan_lock_name or not isinstance(obj, dict):
@@ -726,10 +790,21 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
             changed = True
     if add_plan_nudge and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Plan compatibility instruction" in m.get("content", "") for m in messages)
+        plan_paths = _extract_plan_md_paths_from_messages(messages)
         if not already:
-            plan_paths = _extract_plan_md_paths_from_messages(messages)
             messages = [make_plan_update_nudge(plan_update_name, plan_paths)] + messages
             out["_cursor_plan_update_name"] = plan_update_name
+            changed = True
+        read_plan_path = _plan_md_read_result_seen(messages, plan_paths)
+        already_applypatch = any(
+            isinstance(m, dict)
+            and isinstance(m.get("content"), str)
+            and "the active plan markdown has already been read" in m.get("content", "")
+            for m in messages
+        )
+        if read_plan_path and not already_applypatch:
+            messages = [make_plan_applypatch_after_read_nudge(read_plan_path)] + messages
+            out["_cursor_plan_update_after_read"] = read_plan_path
             changed = True
     resp = {}
     for k in ("model", "stream", "temperature", "top_p", "reasoning", "reasoning_effort", "service_tier", "user", "prompt_cache_key"):
