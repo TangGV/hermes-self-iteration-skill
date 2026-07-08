@@ -654,6 +654,31 @@ def make_plan_update_nudge(plan_name: str, plan_paths: list[str] | None = None):
     }
 
 
+def _plan_read_without_write(messages) -> bool:
+    """Plan follow-up has read the existing .plan.md but has not edited it yet."""
+    if not isinstance(messages, list):
+        return False
+    seen_plan_read = False
+    seen_plan_write = False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        name = str(msg.get("name") or "")
+        txt = _message_text_for_plan_hint(msg)
+        low = txt.lower()
+        if msg.get("role") == "tool" or msg.get("tool_call_id"):
+            if name in {"ReadFile", "Read"} and ".plan.md" in txt:
+                seen_plan_read = True
+            if name in {"ApplyPatch", "Write", "Edit", "Shell"} and (".plan.md" in txt or "success" in low or "edited" in low):
+                seen_plan_write = True
+        # Cursor sometimes only preserves rendered assistant/tool text.
+        if "read " in low and ".plan.md" in low:
+            seen_plan_read = True
+        if ("applypatch" in low or "edited" in low or "write" in low) and ".plan.md" in low:
+            seen_plan_write = True
+    return seen_plan_read and not seen_plan_write
+
+
 def strip_createplan_tool_when_locked(obj: dict, plan_lock_name: str) -> bool:
     """Official follow-up turns use edit-in-place, not a second CreatePlan tool call."""
     if not plan_lock_name or not isinstance(obj, dict):
@@ -709,13 +734,16 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
     plan_update_name = _first_plan_identity(messages) or (plan_names[0] if plan_names else "")
     add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
     plan_lock_name = resolve_plan_lock_name(out)
+    force_plan_edit_tool = False
     if plan_lock_name:
         plan_update_name = plan_lock_name
         add_plan_nudge = True
+        force_plan_edit_tool = _plan_read_without_write(messages)
         if strip_createplan_tool_when_locked(out, plan_lock_name):
             changed = True
         if _latest_user_turn_plan_mode(messages):
             changed = cap_plan_followup_reasoning(out) or changed
+
     if force_initial_tool and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Agent compatibility instruction" in m.get("content", "") for m in messages)
         if not already:
@@ -755,10 +783,10 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
         changed = changed or bool(set(inbound_custom_tools) & set(outbound_custom_tools))
         # Do not forward `metadata` to /v1/responses — upstream rejects Unsupported parameter: metadata.
 
-        if force_initial_tool:
+        if force_initial_tool or force_plan_edit_tool:
             resp["tool_choice"] = "required"
         elif out.get("tool_choice") not in (None, {}, "none"):
-            # After Cursor has returned any tool result, do not keep forcing required.
+
             # Let the model either call another tool or finish; otherwise failed Read
             # attempts can loop forever.
             resp["tool_choice"] = "auto" if out.get("tool_choice") == "required" else out.get("tool_choice")
