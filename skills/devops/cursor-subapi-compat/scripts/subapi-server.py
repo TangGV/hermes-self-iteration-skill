@@ -655,28 +655,14 @@ def make_plan_update_nudge(plan_name: str, plan_paths: list[str] | None = None):
     }
 
 
-def _conversation_has_edit_intent(messages) -> bool:
-    if not isinstance(messages, list):
-        return False
-    texts = []
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") in ("user", "developer", "assistant"):
-            txt = _message_text_for_plan_hint(msg)
-            if txt:
-                texts.append(txt)
-    hay = "\n".join(texts[-12:]).lower()
-    if any(h.lower() in hay for h in SUMMARY_ONLY_HINTS):
-        return False
-    return any(h.lower() in hay for h in ACTIONABLE_TOOL_HINTS)
-
-
 def _read_without_write_after_actionable_request(messages) -> bool:
     """Actionable coding request has read files but has not performed an edit/write yet.
 
-    Cursor often folds the original user text in later Agent turns, so detect edit
-    intent from recent assistant/user prose as well (e.g. "我会补注释").
+    Cursor custom-provider Agent can otherwise stop with prose like "I will edit"
+    after several ReadFile calls.  For actionable edit/comment/fix tasks, keep
+    the turn in tool mode until an edit-capable tool is emitted.
     """
-    if not _conversation_has_edit_intent(messages):
+    if not should_force_tool_choice(messages):
         return False
     if not isinstance(messages, list):
         return False
@@ -693,11 +679,13 @@ def _read_without_write_after_actionable_request(messages) -> bool:
                 seen_read = True
             if name in {"ApplyPatch", "Write", "Edit", "EditNotebook", "Delete"}:
                 seen_write = True
+            # Shell can be a write path when model chooses python/perl/etc.; treat
+            # explicit edit/write success text as write, not every shell read/grep.
             if name == "Shell" and any(x in low for x in ("edited", "updated", "wrote", "success", "modified", "写入", "修改")):
                 seen_write = True
         if low.startswith("read ") or "\nread " in low:
             seen_read = True
-        if any(x in low for x in ("applypatch", "edited ", "write ", "wrote ", "updated ", "modified ", "已修改", "已写入")):
+        if any(x in low for x in ("applypatch", "edited ", "write ", "wrote ", "updated ", "modified ")):
             seen_write = True
     return seen_read and not seen_write
 
