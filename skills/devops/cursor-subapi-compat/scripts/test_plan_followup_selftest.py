@@ -73,12 +73,52 @@ def test_first_plan_keeps_createplan() -> None:
     print("PASS first_plan: CreatePlan kept, lock empty")
 
 
+def test_interrupted_createplan_no_lock() -> None:
+    body = {
+        "model": "gpt-5.5",
+        "stream": True,
+        "messages": [
+            {"role": "user", "content": "<user_query>内容太少了</user_query>"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "cp1",
+                        "type": "function",
+                        "function": {
+                            "name": "CreatePlan",
+                            "arguments": json.dumps({"name": "通用执行计划"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "cp1",
+                "name": "CreatePlan",
+                "content": [{"type": "text", "text": "Error: CreatePlan was interrupted by the user after 9418ms"}],
+            },
+        ],
+        "tools": [
+            {"type": "function", "function": {"name": "CreatePlan", "parameters": {}}},
+            {"type": "function", "function": {"name": "ReadFile", "parameters": {}}},
+        ],
+    }
+    raw = json.dumps(body).encode()
+    _, _, robj, lock = mod.build_response_request_from_chat(raw)
+    assert lock == "", f"interrupted CreatePlan must not lock, got {lock!r}"
+    names = plan_fn_names(robj.get("tools"))
+    assert "CreatePlan" in names, f"retry turn should still expose CreatePlan: {names}"
+    print("PASS interrupted_createplan: no lock, CreatePlan kept for retry")
+
+
 def main() -> int:
     cap = Path(r"C:/Users/t/AppData/Local/Temp/vps3_cap/subapi-20260707-210001.json")
     if not cap.is_file():
         print("SKIP capture missing:", cap)
         return 2
     test_first_plan_keeps_createplan()
+    test_interrupted_createplan_no_lock()
     test_capture(cap, "user_210001_simplify")
     test_capture(Path(r"C:/Users/t/AppData/Local/Temp/vps3_cap/subapi-latest.json"), "latest")
     print("OK all self-tests")

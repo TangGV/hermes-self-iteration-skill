@@ -293,15 +293,36 @@ def _looks_like_plan_display_name(name: str) -> bool:
     return low not in _CURSOR_BUILTIN_TOOL_NAMES
 
 
+def _failed_createplan_tool_call_ids(messages) -> set:
+    """CreatePlan tool results Cursor marks as interrupted/error must not anchor plan_lock."""
+    failed: set = set()
+    if not isinstance(messages, list):
+        return failed
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        if not _is_plan_function_name(str(msg.get("name") or "")):
+            continue
+        txt = _message_text_for_plan_hint(msg).lower()
+        if "interrupted" in txt or "error" in txt:
+            tid = msg.get("tool_call_id")
+            if isinstance(tid, str) and tid:
+                failed.add(tid)
+    return failed
+
+
 def _extract_plan_names_from_messages(messages) -> list[str]:
     names = []
     if not isinstance(messages, list):
         return names
+    failed_cp = _failed_createplan_tool_call_ids(messages)
     for msg in messages:
         if not isinstance(msg, dict):
             continue
         for tc in msg.get("tool_calls") or []:
             if not isinstance(tc, dict):
+                continue
+            if tc.get("id") in failed_cp:
                 continue
             fn = tc.get("function") or {}
             if not _is_plan_function_name(str(fn.get("name") or "")):
@@ -398,19 +419,32 @@ def resolve_plan_lock_name(obj: dict) -> str:
 def _conversation_has_createplan_history(messages) -> bool:
     if not isinstance(messages, list):
         return False
+    if _extract_plan_slugs_from_plan_md_paths(messages):
+        return True
+    failed_cp = _failed_createplan_tool_call_ids(messages)
     for msg in messages:
         if not isinstance(msg, dict):
             continue
         for tc in msg.get("tool_calls") or []:
             if not isinstance(tc, dict):
                 continue
+            if tc.get("id") in failed_cp:
+                continue
             fn = tc.get("function") or {}
             if _is_plan_function_name(str(fn.get("name") or "")):
                 return True
         if msg.get("role") == "tool" and _is_plan_function_name(str(msg.get("name") or "")):
+            tid = msg.get("tool_call_id")
+            if isinstance(tid, str) and tid in failed_cp:
+                continue
+            txt = _message_text_for_plan_hint(msg).lower()
+            if "interrupted" in txt or "error" in txt:
+                continue
             return True
         txt = _message_text_for_plan_hint(msg)
         if "createPlanToolCall" in txt:
+            return True
+        if ".plan.md" in txt and ("edited" in txt.lower() or "editToolCall" in txt):
             return True
     return False
 
@@ -488,8 +522,8 @@ def make_plan_update_nudge(plan_name: str):
         "content": (
             "Cursor Plan update (match official Cursor Plan mode): an existing plan is already active "
             f"with slug/name {safe_name!r}. Do NOT call CreatePlan again for revisions, simplifications, or v2/v3 updates. "
-            "Instead: use Glob or ReadFile to locate the existing file under .cursor/plans/ matching that slug, "
-            "then update that .plan.md in place (Shell or other allowed write tools). "
+            "Instead: use ReadFile on the existing `.cursor/plans/` file for that plan (match the slug in the filename), "
+            "then update that `.plan.md` in place (same pattern as official Plan mode: Edited …plan.md), using Shell or other allowed write tools. "
             "Do not create a new plan file, new slug, or second plan entry."
         ),
     }
