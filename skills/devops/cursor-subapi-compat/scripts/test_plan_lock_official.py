@@ -97,6 +97,25 @@ def test_fix_createplan_rewrites_name() -> None:
     assert json.loads(out)["name"] == "short-plan"
 
 
+def test_strip_createplan_when_locked():
+    obj = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": "CreatePlan", "arguments": '{"name":"short-plan","plan":"#"}'}}
+                ],
+            },
+            {"role": "user", "content": "继续简化下计划，不要新开计划"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "CreatePlan"}}, {"type": "function", "function": {"name": "ReadFile"}}],
+    }
+    assert mod.strip_createplan_tool_when_locked(obj, "short-plan")
+    names = [(t.get("function") or {}).get("name") for t in obj["tools"]]
+    assert "CreatePlan" not in names
+    assert "ReadFile" in names
+
+
 if __name__ == "__main__":
     test_locks_first_createplan_name()
     test_plan_md_path_fallback()

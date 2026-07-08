@@ -486,13 +486,39 @@ def make_plan_update_nudge(plan_name: str):
     return {
         "role": "system",
         "content": (
-            "Cursor Plan compatibility instruction: this conversation already has an existing plan named "
-            f"{safe_name!r}. If the user asks to modify/update/revise/iterate the existing or original plan, "
-            "call the plan creation tool with exactly the same args.name value above and the full updated plan content. "
-            "Do not invent a new plan name, do not append suffixes to args.name, and do not create a second plan. "
-            "Only the plan title/body may change."
+            "Cursor Plan update (match official Cursor Plan mode): an existing plan is already active "
+            f"with slug/name {safe_name!r}. Do NOT call CreatePlan again for revisions, simplifications, or v2/v3 updates. "
+            "Instead: use Glob or ReadFile to locate the existing file under .cursor/plans/ matching that slug, "
+            "then update that .plan.md in place (Shell or other allowed write tools). "
+            "Do not create a new plan file, new slug, or second plan entry."
         ),
     }
+
+
+def strip_createplan_tool_when_locked(obj: dict, plan_lock_name: str) -> bool:
+    """Official follow-up turns use edit-in-place, not a second CreatePlan tool call."""
+    if not plan_lock_name or not isinstance(obj, dict):
+        return False
+    if not _conversation_has_createplan_history(obj.get("messages")):
+        return False
+    tools = obj.get("tools")
+    if not isinstance(tools, list):
+        return False
+    kept = []
+    removed = False
+    for t in tools:
+        if not isinstance(t, dict):
+            kept.append(t)
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else {}
+        if _is_plan_function_name(fn.get("name")):
+            removed = True
+            continue
+        kept.append(t)
+    if not removed:
+        return False
+    obj["tools"] = kept
+    return True
 
 
 def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
@@ -527,6 +553,8 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
     if plan_lock_name:
         plan_update_name = plan_lock_name
         add_plan_nudge = True
+        if strip_createplan_tool_when_locked(out, plan_lock_name):
+            changed = True
     if force_initial_tool and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Agent compatibility instruction" in m.get("content", "") for m in messages)
         if not already:
@@ -1197,6 +1225,17 @@ class Handler(BaseHTTPRequestHandler):
                         self.log_message("req-audit %s", audit_request(robj, mode))
                         if plan_lock_name:
                             self.log_message("plan-lock name=%s", plan_lock_name[:120])
+                            if isinstance(robj, dict) and isinstance(robj.get("tools"), list):
+                                self.log_message(
+                                    "plan-lock tools=%s createplan_present=%s",
+                                    len(robj.get("tools") or []),
+                                    any(
+                                        _is_plan_function_name(
+                                            ((t.get("function") or {}) if isinstance(t, dict) else {}).get("name")
+                                        )
+                                        for t in (robj.get("tools") or [])
+                                    ),
+                                )
                         self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s stream=%s plan_lock=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, bool(robj.get("stream")), bool(plan_lock_name))
                     else:
                         body, changed = normalize_chat_body(raw)
