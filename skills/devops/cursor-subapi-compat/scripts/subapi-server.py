@@ -56,7 +56,8 @@ ACTIONABLE_TOOL_HINTS = (
     "write", "create", "edit", "modify", "update", "fix", "implement",
     "run", "execute", "apply", "save", "commit", "generate", "continue",
     "写", "创建", "新建", "修改", "改", "修", "执行", "运行", "保存",
-    "落地", "实现", "继续", "生成", "提交", "文档", "文件",
+    "落地", "实现", "继续", "生成", "提交", "文档", "文件", "注释",
+    "comment", "comments", "annotate", "annotation",
 )
 SUMMARY_ONLY_HINTS = (
     "summarize", "summary", "explain", "analyze", "review only",
@@ -654,6 +655,41 @@ def make_plan_update_nudge(plan_name: str, plan_paths: list[str] | None = None):
     }
 
 
+def _read_without_write_after_actionable_request(messages) -> bool:
+    """Actionable coding request has read files but has not performed an edit/write yet.
+
+    Cursor custom-provider Agent can otherwise stop with prose like "I will edit"
+    after several ReadFile calls.  For actionable edit/comment/fix tasks, keep
+    the turn in tool mode until an edit-capable tool is emitted.
+    """
+    if not should_force_tool_choice(messages):
+        return False
+    if not isinstance(messages, list):
+        return False
+    seen_read = False
+    seen_write = False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        name = str(msg.get("name") or "")
+        txt = _message_text_for_plan_hint(msg)
+        low = txt.lower()
+        if msg.get("role") == "tool" or msg.get("tool_call_id"):
+            if name in {"ReadFile", "Read"}:
+                seen_read = True
+            if name in {"ApplyPatch", "Write", "Edit", "EditNotebook", "Delete"}:
+                seen_write = True
+            # Shell can be a write path when model chooses python/perl/etc.; treat
+            # explicit edit/write success text as write, not every shell read/grep.
+            if name == "Shell" and any(x in low for x in ("edited", "updated", "wrote", "success", "modified", "写入", "修改")):
+                seen_write = True
+        if low.startswith("read ") or "\nread " in low:
+            seen_read = True
+        if any(x in low for x in ("applypatch", "edited ", "write ", "wrote ", "updated ", "modified ")):
+            seen_write = True
+    return seen_read and not seen_write
+
+
 def _plan_read_without_write(messages) -> bool:
     """Plan follow-up has read the existing .plan.md but has not edited it yet."""
     if not isinstance(messages, list):
@@ -735,6 +771,7 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
     add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
     plan_lock_name = resolve_plan_lock_name(out)
     force_plan_edit_tool = False
+    force_read_edit_tool = _read_without_write_after_actionable_request(messages)
     if plan_lock_name:
         plan_update_name = plan_lock_name
         add_plan_nudge = True
@@ -783,10 +820,10 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
         changed = changed or bool(set(inbound_custom_tools) & set(outbound_custom_tools))
         # Do not forward `metadata` to /v1/responses — upstream rejects Unsupported parameter: metadata.
 
-        if force_initial_tool or force_plan_edit_tool:
+        if force_initial_tool or force_plan_edit_tool or force_read_edit_tool:
             resp["tool_choice"] = "required"
         elif out.get("tool_choice") not in (None, {}, "none"):
-
+            # After Cursor has returned any tool result, do not keep forcing required.
             # Let the model either call another tool or finish; otherwise failed Read
             # attempts can loop forever.
             resp["tool_choice"] = "auto" if out.get("tool_choice") == "required" else out.get("tool_choice")
