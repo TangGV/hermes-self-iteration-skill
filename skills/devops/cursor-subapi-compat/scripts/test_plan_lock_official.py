@@ -38,6 +38,18 @@ def test_plan_md_path_fallback():
     assert mod._first_plan_identity(messages) == "workspace-tidy-v3"
 
 
+def test_chinese_plan_md_path_fallback():
+    messages = [
+        {"role": "assistant", "content": "Read C:\\Users\\admin\\.cursor\\plans\\示例开发计划_2534a917.plan.md L1-30"},
+        {"role": "user", "content": "<user_query>更多点内容</user_query>"},
+    ]
+    assert mod._first_plan_identity(messages) == "示例开发计划"
+    obj = {"messages": messages, "tools": [{"type": "function", "function": {"name": "CreatePlan"}}]}
+    assert mod.resolve_plan_lock_name(obj) == "示例开发计划"
+    assert mod.strip_createplan_tool_when_locked(obj, "示例开发计划")
+    assert not any((t.get("function") or {}).get("name") == "CreatePlan" for t in obj["tools"])
+
+
 def test_no_lock_on_new_plan():
     messages = [{"role": "user", "content": "新建计划，另起一个"}]
     obj = {"messages": messages}
@@ -97,6 +109,26 @@ def test_fix_createplan_rewrites_name() -> None:
     assert json.loads(out)["name"] == "short-plan"
 
 
+def test_sse_suppresses_createplan_when_locked() -> None:
+    class FakeResp:
+        def __init__(self, rows):
+            self.rows = [r.encode("utf-8") for r in rows]
+        def readline(self):
+            return self.rows.pop(0) if self.rows else b""
+
+    rows = [
+        'data: {"type":"response.created","id":"resp_1","model":"gpt-5.4"}\n',
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"CreatePlan","call_id":"call_cp"}}\n',
+        'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"name\\":\\"示例开发计划 v2\\"}"}\n',
+        'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"CreatePlan","arguments":"{\\"name\\":\\"示例开发计划 v2\\"}"}}\n',
+        'data: {"type":"response.completed"}\n',
+    ]
+    out = b"".join(mod.responses_sse_to_chat(FakeResp(rows), plan_lock_name="示例开发计划")).decode("utf-8")
+    assert "CreatePlan" not in out
+    assert '"tool_calls"' not in out
+    assert '"finish_reason":"stop"' in out
+
+
 def test_strip_createplan_when_locked():
     obj = {
         "messages": [
@@ -119,8 +151,11 @@ def test_strip_createplan_when_locked():
 if __name__ == "__main__":
     test_locks_first_createplan_name()
     test_plan_md_path_fallback()
+    test_chinese_plan_md_path_fallback()
     test_no_lock_on_new_plan()
     test_short_plan_optimize_user_query_only()
     test_polluted_history_still_locks_session_root()
     test_fix_createplan_rewrites_name()
+    test_sse_suppresses_createplan_when_locked()
+    test_strip_createplan_when_locked()
     print("OK all plan lock tests")

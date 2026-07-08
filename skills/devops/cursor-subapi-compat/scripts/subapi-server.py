@@ -453,7 +453,10 @@ def _extract_plan_slugs_from_plan_md_paths(messages) -> list[str]:
     slugs: list[str] = []
     if not isinstance(messages, list):
         return slugs
-    pat = re.compile(r"([a-z][a-z0-9]+(?:-[a-z0-9]+)*)_[a-f0-9]{6,}\.plan\.md", re.IGNORECASE)
+    pat = re.compile(
+        r"([^\s/\\]+)_[a-f0-9]{6,}\.plan\.md",
+        re.IGNORECASE,
+    )
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -463,6 +466,57 @@ def _extract_plan_slugs_from_plan_md_paths(messages) -> list[str]:
             if val and val not in slugs:
                 slugs.append(val)
     return slugs
+
+
+def _extract_plan_md_filenames(messages) -> list[str]:
+    """Last-seen `.plan.md` basenames from tool output / assistant text (official edit-in-place anchor)."""
+    found: list[str] = []
+    if not isinstance(messages, list):
+        return found
+    pat = re.compile(
+        r"([\w\u4e00-\u9fff][\w\u4e00-\u9fff_-]*)_[a-f0-9]{6,}\.plan\.md",
+        re.IGNORECASE,
+    )
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        txt = _message_text_for_plan_hint(msg)
+        for m in pat.finditer(txt):
+            name = m.group(0)
+            if name not in found:
+                found.append(name)
+    return found[-3:]
+
+
+def _extract_plan_md_paths_from_messages(messages) -> list[str]:
+    paths: list[str] = []
+    if not isinstance(messages, list):
+        return paths
+    pat = re.compile(r"([^\s'\"<>]+_[a-f0-9]{6,}\.plan\.md)", re.IGNORECASE)
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        txt = _message_text_for_plan_hint(msg)
+        for m in pat.finditer(txt):
+            val = m.group(1).strip().replace("\\", "/")
+            if val and val not in paths:
+                paths.append(val)
+    return paths[-3:]
+
+
+def cap_plan_followup_reasoning(obj: dict) -> bool:
+    """Large Plan threads + xhigh tend to Shell-spelunk instead of editing `.plan.md` like official Cursor."""
+    if not isinstance(obj, dict):
+        return False
+    changed = False
+    r = obj.get("reasoning")
+    if isinstance(r, dict) and str(r.get("effort") or "").lower() == "xhigh":
+        obj["reasoning"] = {**r, "effort": "high"}
+        changed = True
+    if str(obj.get("reasoning_effort") or "").lower() == "xhigh":
+        obj["reasoning_effort"] = "high"
+        changed = True
+    return changed
 
 
 PLAN_SSE_CHAR_CHUNK = 24
@@ -515,16 +569,25 @@ def should_add_plan_update_nudge(obj: dict, plan_name: str) -> bool:
     return _conversation_has_createplan_history(messages) and bool(plan_name)
 
 
-def make_plan_update_nudge(plan_name: str):
+def make_plan_update_nudge(plan_name: str, plan_paths: list[str] | None = None):
     safe_name = str(plan_name).replace("\n", " ")[:180]
+    path_hint = ""
+    if plan_paths:
+        path_hint = (
+            " Known plan files in this thread: "
+            + ", ".join(plan_paths[-2:])
+            + ". Your FIRST tool on a plan revision MUST be ReadFile on that `.plan.md` "
+            "(or Glob only under `.cursor/plans/` matching the slug) — do NOT run repo-wide Shell/rg before updating the plan markdown."
+        )
     return {
         "role": "system",
         "content": (
-            "Cursor Plan update (match official Cursor Plan mode): an existing plan is already active "
+            "Cursor Plan compatibility instruction — match official Cursor Plan mode: an existing plan is already active "
             f"with slug/name {safe_name!r}. Do NOT call CreatePlan again for revisions, simplifications, or v2/v3 updates. "
-            "Instead: use ReadFile on the existing `.cursor/plans/` file for that plan (match the slug in the filename), "
-            "then update that `.plan.md` in place (same pattern as official Plan mode: Edited …plan.md), using Shell or other allowed write tools. "
-            "Do not create a new plan file, new slug, or second plan entry."
+            "Instead: ReadFile the existing `.cursor/plans/` markdown for that plan, then update that `.plan.md` in place "
+            "(official UI: Edited …plan.md / Explored …plan.md), using Write/ApplyPatch or Shell only to write the plan file. "
+            "Do not create a new plan file, new slug, or second Created Plan card."
+            + path_hint
         ),
     }
 
@@ -589,6 +652,8 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
         add_plan_nudge = True
         if strip_createplan_tool_when_locked(out, plan_lock_name):
             changed = True
+        if _latest_user_turn_plan_mode(messages):
+            changed = cap_plan_followup_reasoning(out) or changed
     if force_initial_tool and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Agent compatibility instruction" in m.get("content", "") for m in messages)
         if not already:
@@ -597,7 +662,8 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
     if add_plan_nudge and isinstance(messages, list):
         already = any(isinstance(m, dict) and isinstance(m.get("content"), str) and "Cursor Plan compatibility instruction" in m.get("content", "") for m in messages)
         if not already:
-            messages = [make_plan_update_nudge(plan_update_name)] + messages
+            plan_paths = _extract_plan_md_paths_from_messages(messages)
+            messages = [make_plan_update_nudge(plan_update_name, plan_paths)] + messages
             out["_cursor_plan_update_name"] = plan_update_name
             changed = True
     resp = {}
@@ -817,6 +883,7 @@ def responses_sse_to_chat(resp, fallback_usage=None, plan_lock_name=""):
     tool_arg_streamed = {}
     tool_names_by_key = {}
     tool_arg_full = {}
+    suppressed_tool_keys = set()
     next_tool_index = 0
     completed = False
     text_buf = []
@@ -932,20 +999,26 @@ def responses_sse_to_chat(resp, fallback_usage=None, plan_lock_name=""):
             if isinstance(item, dict) and item.get("type") == "message":
                 last_output_kind = "text"
             if isinstance(item, dict) and item.get("type") == "function_call":
+                tool_name = str(item.get("name") or "tool")
                 saw_tool = True
-                last_output_kind = "tool"
                 call_id = normalize_call_id(item.get("call_id") or item.get("id"), str(item.get("name")) + str(obj.get("output_index")))
                 key = str(obj.get("output_index", call_id))
-                tool_names_by_key[key] = str(item.get("name") or "tool")
+                tool_names_by_key[key] = tool_name
+                if plan_lock_name and _is_plan_function_name(tool_name):
+                    suppressed_tool_keys.add(key)
+                    continue
+                last_output_kind = "tool"
                 idx = tool_indices.setdefault(key, next_tool_index)
                 if idx == next_tool_index:
                     next_tool_index += 1
                 tool_arg_streamed.setdefault(key, False)
-                yield sse_event(None, chat_chunk(resp_id, model, {"tool_calls": [{"index": idx, "id": call_id, "type": "function", "function": {"name": item.get("name") or "tool", "arguments": ""}}]}))
+                yield sse_event(None, chat_chunk(resp_id, model, {"tool_calls": [{"index": idx, "id": call_id, "type": "function", "function": {"name": tool_name, "arguments": ""}}]}))
         elif typ == "response.function_call_arguments.delta":
             saw_tool = True
-            last_output_kind = "tool"
             key = str(obj.get("output_index", obj.get("item_id", "0")))
+            if key in suppressed_tool_keys:
+                continue
+            last_output_kind = "tool"
             idx = tool_indices.setdefault(key, next_tool_index)
             if idx == next_tool_index:
                 next_tool_index += 1
@@ -971,9 +1044,13 @@ def responses_sse_to_chat(resp, fallback_usage=None, plan_lock_name=""):
                         yield sse_event(None, chat_chunk(resp_id, model, {"content": piece}))
             if isinstance(item, dict) and item.get("type") == "function_call":
                 saw_tool = True
-                last_output_kind = "tool"
                 key = str(obj.get("output_index", item.get("call_id", "0")))
-                tool_names_by_key[key] = str(item.get("name") or tool_names_by_key.get(key, "tool"))
+                tool_name = str(item.get("name") or tool_names_by_key.get(key, "tool"))
+                tool_names_by_key[key] = tool_name
+                if key in suppressed_tool_keys or (plan_lock_name and _is_plan_function_name(tool_name)):
+                    suppressed_tool_keys.add(key)
+                    continue
+                last_output_kind = "tool"
                 idx = tool_indices.setdefault(key, next_tool_index)
                 if idx == next_tool_index:
                     next_tool_index += 1
@@ -1270,7 +1347,8 @@ class Handler(BaseHTTPRequestHandler):
                                         for t in (robj.get("tools") or [])
                                     ),
                                 )
-                        self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s stream=%s plan_lock=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, bool(robj.get("stream")), bool(plan_lock_name))
+                        upstream_tools = len(robj.get("tools") or []) if isinstance(robj, dict) else request_tools_count
+                        self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s upstream_tools=%s stream=%s plan_lock=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, upstream_tools, bool(robj.get("stream")), bool(plan_lock_name))
                     else:
                         body, changed = normalize_chat_body(raw)
                         obj2 = json.loads((body or raw).decode("utf-8"))
