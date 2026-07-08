@@ -293,7 +293,7 @@ def _tool_names_from_responses_tools(tools):
 def make_actionable_nudge():
     return {
         "role": "system",
-        "content": "Cursor Agent compatibility instruction: the user is asking for an actionable coding/file/command task. Do not finish with prose only. Use the available tools to perform the requested action. For source-code/file edits, prefer the ApplyPatch tool over Shell or full-file Write so Cursor can render native editor diffs. Only provide a final text answer after the necessary tool calls have completed.",
+        "content": "Cursor Agent compatibility instruction: the user is asking for an actionable coding/file/command task. Use the available tools when an edit, command, or file operation is actually required. For file edits, ApplyPatch is the safest OpenAI-compatible tool available on this custom-provider path, but it is not the same as official Cursor editToolCall/native inline-diff protocol. Do not claim native Cursor editToolCall parity unless that typed tool is actually present.",
     }
 
 
@@ -704,7 +704,10 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
             if msg.get("role") == "tool" or msg.get("tool_call_id"):
                 has_tool_result = True
                 break
-    force_initial_tool = actionable and not has_tool_result
+    # Do not force tool_choice based on keywords. Official Composer uses typed
+    # editToolCall/createPlanToolCall protocol events; broad OpenAI
+    # tool_choice=required only masks the protocol gap and can cause loops.
+    force_initial_tool = False
     plan_names = _extract_plan_names_from_messages(messages)
     plan_update_name = _first_plan_identity(messages) or (plan_names[0] if plan_names else "")
     add_plan_nudge = should_add_plan_update_nudge(out, plan_update_name)
@@ -755,9 +758,7 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
         changed = changed or bool(set(inbound_custom_tools) & set(outbound_custom_tools))
         # Do not forward `metadata` to /v1/responses — upstream rejects Unsupported parameter: metadata.
 
-        if force_initial_tool:
-            resp["tool_choice"] = "required"
-        elif out.get("tool_choice") not in (None, {}, "none"):
+        if out.get("tool_choice") not in (None, {}, "none"):
             # After Cursor has returned any tool result, do not keep forcing required.
             # Let the model either call another tool or finish; otherwise failed Read
             # attempts can loop forever.

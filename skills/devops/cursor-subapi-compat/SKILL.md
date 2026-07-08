@@ -7,6 +7,7 @@ description: Cursor IDE：`api.aigcfast.com`（8326 CPA）与 `subapi.aigcfast.c
 
 ## Context Usage / 压缩控制
 
+- **官方 Composer 2.5 反推结论（2026-07-08）：** 官方 CLI/Composer 对 C#/Markdown/JSON/plain text/new file 都用 typed `editToolCall(args.path,args.streamContent)`，结果含 `diffString`、`beforeFullFileContent?`、`afterFullFileContent`、`linesAdded/Removed`；删除是 `deleteToolCall`，重命名是 `shellToolCall`，Plan 是 `createPlanToolCall + interaction_query:createPlanRequestQuery`。因此 `ApplyPatch` custom grammar 只是 custom OpenAI 路径的低风险兼容项，不等于官方 native inline diff；不要再用关键词 + broad `tool_choice=required` 硬顶来伪装官方行为。证据项目：`C:/Users/t/cursor-protocol-lab/reports/official-tool-matrix.md`、`official-content-type-matrix.md`、`subapi3-current-correction-summary.md`。
 - **Cursor 编辑器逐行 diff / ApplyPatch 体验：** Cursor 原始 `ApplyPatch` 是 `function` wrapper 里的 **custom grammar tool**（`function.type=custom` + `format.type=grammar`），转 `/v1/responses` 时必须保留为 `{"type":"custom","name":"ApplyPatch","format":...}`；如果扁平化成普通 JSON function，会丢 patch grammar，模型更容易走 `Write/Shell` 或生成差体验补丁，Cursor 原生 inline diff/编辑器渲染会变差。验证看 SubAPI 的 Cursor 翻译服务 journal：`edit-tool-audit ... inbound_custom=ApplyPatch outbound_custom=ApplyPatch applypatch_custom_preserved=True`；回归脚本 `scripts/test_custom_applypatch_tool.py`。
 
 - Context Usage 0% / 未压缩：先看 `references/cursor-context-usage-control.md`。
