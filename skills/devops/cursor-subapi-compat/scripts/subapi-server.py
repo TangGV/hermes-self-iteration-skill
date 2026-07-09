@@ -718,6 +718,87 @@ def make_plan_applypatch_after_read_nudge(plan_path: str):
     }
 
 
+def _user_wants_plan_revision(text: str) -> bool:
+    """Narrow user intent to revise/expand todos on an existing plan (not start a new plan)."""
+    if not text:
+        return False
+    low = text.lower()
+    if _user_wants_new_plan(text):
+        return False
+    markers = (
+        "todo内容太少",
+        "todo太少",
+        "todo 太少",
+        "待办太少",
+        "扩充todo",
+        "细化todo",
+        "计划太简单",
+        "内容太少",
+        "拆得更细",
+        "更细的待办",
+        "待办事项太少",
+    )
+    return any(m in text or m.lower() in low for m in markers)
+
+
+def _interrupted_createplan_plan_name(messages) -> str:
+    """Last CreatePlan.args.name whose tool result was interrupted (UI may still have .plan.md)."""
+    if not isinstance(messages, list):
+        return ""
+    failed_cp = _failed_createplan_tool_call_ids(messages)
+    if not failed_cp:
+        return ""
+    id_to_name: dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            tid = tc.get("id")
+            if not isinstance(tid, str) or tid not in failed_cp:
+                continue
+            fn = tc.get("function") or {}
+            if not _is_plan_function_name(str(fn.get("name") or "")):
+                continue
+            args = _safe_json_obj(fn.get("arguments")) or {}
+            name = args.get("name")
+            if isinstance(name, str) and _looks_like_plan_display_name(name):
+                id_to_name[tid] = name.strip()
+    if not id_to_name:
+        return ""
+    last_name = ""
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        tid = msg.get("tool_call_id")
+        if not isinstance(tid, str) or tid not in id_to_name:
+            continue
+        if not _is_plan_function_name(str(msg.get("name") or "")):
+            continue
+        txt = _message_text_for_plan_hint(msg).lower()
+        if "interrupted" in txt:
+            last_name = id_to_name[tid]
+    return last_name
+
+
+def make_interrupted_plan_recovery_nudge(plan_name: str):
+    safe_name = str(plan_name).replace("\n", " ")[:180]
+    return {
+        "role": "system",
+        "content": (
+            "Cursor Plan recovery instruction — a previous CreatePlan for "
+            f"{safe_name!r} was marked interrupted in the transcript, but Cursor may have already "
+            "created a local `.plan.md` and shown it in the UI. "
+            "Before calling CreatePlan again, use Glob under `.cursor/plans/` for files matching "
+            f"`{safe_name}_*.plan.md` (or ReadFile if you already know the path). "
+            "If found, update that plan markdown in place with ApplyPatch. "
+            "Only call CreatePlan if no matching plan file exists. "
+            "Do not answer with future intent only."
+        ),
+    }
+
+
 def strip_createplan_tool_when_locked(obj: dict, plan_lock_name: str) -> bool:
     """Official follow-up turns use edit-in-place, not a second CreatePlan tool call."""
     if not plan_lock_name or not isinstance(obj, dict):
@@ -806,6 +887,25 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
             messages = [make_plan_applypatch_after_read_nudge(read_plan_path)] + messages
             out["_cursor_plan_update_after_read"] = read_plan_path
             changed = True
+    interrupted_name = _interrupted_createplan_plan_name(messages)
+    user_text = _latest_user_text(messages)
+    add_interrupted_recovery = (
+        interrupted_name
+        and _user_wants_plan_revision(user_text)
+        and not plan_lock_name
+        and not _user_wants_new_plan(user_text)
+    )
+    if add_interrupted_recovery and isinstance(messages, list):
+        already_recovery = any(
+            isinstance(m, dict)
+            and isinstance(m.get("content"), str)
+            and "Cursor Plan recovery instruction" in m.get("content", "")
+            for m in messages
+        )
+        if not already_recovery:
+            messages = [make_interrupted_plan_recovery_nudge(interrupted_name)] + messages
+            out["_cursor_plan_interrupted_recovery"] = interrupted_name
+            changed = True
     resp = {}
     for k in ("model", "stream", "temperature", "top_p", "reasoning", "reasoning_effort", "service_tier", "user", "prompt_cache_key"):
         if k in out:
@@ -840,6 +940,13 @@ def chat_to_responses_payload(obj: dict) -> tuple[dict, bool, str]:
             resp["tool_choice"] = "auto" if out.get("tool_choice") == "required" else out.get("tool_choice")
     for k in DROP_FOR_RESPONSES:
         resp.pop(k, None)
+    for audit_k in (
+        "_cursor_plan_update_name",
+        "_cursor_plan_update_after_read",
+        "_cursor_plan_interrupted_recovery",
+    ):
+        if audit_k in out:
+            resp[audit_k] = out[audit_k]
     return resp, changed, plan_lock_name
 
 
@@ -1502,6 +1609,20 @@ class Handler(BaseHTTPRequestHandler):
                                         for t in (robj.get("tools") or [])
                                     ),
                                 )
+                        if isinstance(robj, dict) and robj.get("_cursor_plan_interrupted_recovery"):
+                            self.log_message(
+                                "plan-recovery interrupted name=%s createplan_present=%s",
+                                str(robj.get("_cursor_plan_interrupted_recovery"))[:120],
+                                any(
+                                    _is_plan_function_name(
+                                        ((t.get("function") or {}) if isinstance(t, dict) else {}).get("name")
+                                    )
+                                    for t in (robj.get("tools") or [])
+                                    if isinstance(robj.get("tools"), list)
+                                )
+                                if isinstance(robj.get("tools"), list)
+                                else False,
+                            )
                         upstream_tools = len(robj.get("tools") or []) if isinstance(robj, dict) else request_tools_count
                         self.log_message("flow-audit event=request req_id=%s client=%s mode=%s path=%s upath=%s raw_len=%s model=%s reasoning=%s tools=%s upstream_tools=%s stream=%s plan_lock=%s", req_id, client_ip, mode, self.path, upath, request_raw_len, request_model, request_reasoning, request_tools_count, upstream_tools, bool(robj.get("stream")), bool(plan_lock_name))
                     else:
