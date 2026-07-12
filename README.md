@@ -108,6 +108,12 @@ skills/
 | `devops` | `linux-outbound-proxy-mihomo` | 通用 Linux 出站代理方案：mihomo 本机代理、订阅/节点处理、应用接入、出口验证、watchdog 与回退。 |
 | `software-development` | `hermes-self-iteration` | Hermes 自我驱动迭代流程：分析、规划、执行、验证、复盘，适合持续改进服务、文档和工作流。 |
 
+## 运维 Runbook 索引
+
+- `references/vps2-migration-handoff-20260712.md`：VPS2 的脱敏迁移手册，含入口域名/端口/反代链路、Docker/systemd/数据库、DNS 边界、验收与回滚原则；实际秘密与归档只保留在 VPS root-only 快照。
+- `scripts/vps2-migration-snapshot.sh`：不停止业务的 VPS2 root-only 快照生成器（SQLite online backup、配置/数据/Docker image 打包）。
+- `scripts/vps2-migration-restore.sh`：新机受保护恢复脚本；拒绝覆盖同名容器，不自动切 DNS 或启用 Hermes Gateway。
+
 ## 分类规则
 
 | 分类 | 放什么 |
