@@ -128,7 +128,7 @@ metadata:
 - [ ] 桌面 1440px：Logo 与导航在同一 Header 线上；Hero copy 和图谱处于同一个 Grid；没有突兀中缝。
 - [ ] 桌面 1440px：图谱在 Header 下方是独立画布，下一节拥有独立的全宽 section/container。
 - [ ] 1024px：导航单行，Hero 没有重叠或裁切。
-- [ ] 768px、375px、320px：`document.documentElement.scrollWidth <= clientWidth`，`document.body.scrollWidth <= clientWidth`。
+- [ ] 768px、375px、320px：`document.documentElement.scrollWidth <= clientWidth`，`document.body.scrollWidth <= clientWidth`。CDP 设备验收必须从 `about:blank` 创建 target，在导航前设置设备尺寸，等待 `Page.loadEventFired` 与首页元素实际渲染后才截图；空白或低字节截图只能作为诊断证据，不能算通过。
 - [ ] 小于 768px：Hero 严格单列，图谱位于 copy 之后，证明信息可读地堆叠。
 - [ ] 语言、主题、通知、登录等控制具备键盘焦点和可访问名称。
 - [ ] 主文案及 CTA 的对比度达到 WCAG AA；首页白色主题和控制台主题均实际测试。
