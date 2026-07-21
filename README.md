@@ -107,6 +107,7 @@ skills/
 | `devops` | `subapi-gpt-image2-compat` | SubAPI `gpt-image-2` 文生图/图生图兼容：Nginx→8328、Images API 映射、官方 JSON 返回、非聊天路径边界。 |
 | `devops` | `linux-outbound-proxy-mihomo` | 通用 Linux 出站代理方案：mihomo 本机代理、订阅/节点处理、应用接入、出口验证、watchdog 与回退。 |
 | `software-development` | `hermes-self-iteration` | Hermes 自我驱动迭代流程：分析、规划、执行、验证、复盘，适合持续改进服务、文档和工作流。 |
+| `software-development` | `subapi-landing-layout-guardrails` | SubAPI 公共首页布局约束：统一 Header/Hero 版心、图谱独立画布、响应式无横向溢出与真实多视口视觉验收。 |
 
 ## 运维 Runbook 索引
 
