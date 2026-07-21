@@ -37,10 +37,11 @@ metadata:
 1. **全页只有一套横向坐标系**：Header、Hero、下一节均复用相同的 `--page-max` 与 `--page-pad`。
 2. **Header 必须是页面级组件**：Logo 与完整导航在同一个 `.site-header__inner` 中。禁止把导航放进 Hero 右栏或图谱组件。
 3. **Hero 必须使用文档流 Grid**：左右栏由 `.hero-inner` 管理；使用 `grid-template-columns: minmax(0, <copy>) minmax(0, 1fr)` 与 `gap` 分隔。
-4. **图谱是独立画布**：网格、SVG/canvas、发光、裁切都属于 `.graph-panel`。图谱不得给 Header、Hero 右栏或页面根节点铺背景。
-5. **中线不可作为装饰**：不使用无数据/交互意义的垂直分割线、rail、双 border 或伪元素。左右距离只由 Grid gap 表达。
-6. **下一节必须与 Hero 同级**：Hero 后的标题、价值说明、客户证明不能嵌在 `.hero-copy` / `.hero-left` 内。
-7. **所有布局先进入正常文档流**：禁止用 `50vw`、固定 left margin、全局 `absolute/fixed` 方式拼 Hero 两栏。
+4. **媒体 Grid 项必须显式占满可用宽度**：图谱或媒体外层使用 `justify-self-end` 等自对齐时，必须写 `w-full min-w-0`。否则内部 `w-full max-w-*` 可能按 intrinsic minimum 收缩，页面上只剩近乎不可见的小点。
+5. **图谱是独立画布**：网格、SVG/canvas、发光、裁切都属于 `.graph-panel`。图谱不得给 Header、Hero 右栏或页面根节点铺背景。
+6. **中线不可作为装饰**：不使用无数据/交互意义的垂直分割线、rail、双 border 或伪元素。左右距离只由 Grid gap 表达。
+7. **下一节必须与 Hero 同级**：Hero 后的标题、价值说明、客户证明不能嵌在 `.hero-copy` / `.hero-left` 内。
+8. **所有布局先进入正常文档流**：禁止用 `50vw`、固定 left margin、全局 `absolute/fixed` 方式拼 Hero 两栏。
 
 推荐层级：
 
